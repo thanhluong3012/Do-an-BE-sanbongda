@@ -13,7 +13,7 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware): void {
         // Đăng ký alias cho JwtMiddleware
-        // Bây giờ có thể dùng 'jwt.auth' trong routes
+        // Sử dung middleware tự custom
         $middleware->alias([
             'jwt.auth' => \App\Http\Middleware\JwtMiddleware::class,
         ]);

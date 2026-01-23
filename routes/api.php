@@ -32,7 +32,7 @@ Route::prefix('auth')->group(function () {
 // PROTECTED ROUTES - Cần authentication
 // Sử dụng middleware 'auth:api' để bảo vệ
 // ============================================
-Route::middleware('auth:api')->group(function () {
+Route::middleware('jwt.auth')->group(function () {
 
     // Auth routes - Các chức năng liên quan đến authentication
     Route::apiResource('users', UserController::class);
