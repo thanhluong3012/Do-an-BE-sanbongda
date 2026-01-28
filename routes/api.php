@@ -5,6 +5,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\UserController;
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\RoleController;
 
 /*
 |--------------------------------------------------------------------------
@@ -36,6 +37,8 @@ Route::middleware('jwt.auth')->group(function () {
 
     // Auth routes - Các chức năng liên quan đến authentication
     Route::apiResource('users', UserController::class);
+    Route::apiResource('roles', RoleController::class);
+
     Route::prefix('auth')->group(function () {
         // Đăng xuất: POST /api/auth/logout
         Route::post('logout', [AuthController::class, 'logout']);

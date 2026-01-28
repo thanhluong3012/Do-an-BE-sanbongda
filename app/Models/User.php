@@ -15,11 +15,20 @@ class User extends Authenticatable implements JWTSubject
         'name',
         'email',
         'password',
+        'role_id',
     ];
 
     protected $hidden = [
         'password',
     ];
+
+    /**
+     * Quan hệ với bảng roles
+     */
+    public function role()
+    {
+        return $this->belongsTo(Role::class);
+    }
 
     /**
      * JWT: return the identifier stored in the token
