@@ -6,6 +6,7 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\UserController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\RoleController;
+use App\Http\Controllers\Api\FieldController;
 
 /*
 |--------------------------------------------------------------------------
@@ -29,13 +30,12 @@ Route::prefix('auth')->group(function () {
     Route::post('login', [AuthController::class, 'login']);
 });
 
-// ============================================
-// PROTECTED ROUTES - Cần authentication
-// Sử dụng middleware 'auth:api' để bảo vệ
-// ============================================
+
+Route::apiResource('fields', FieldController::class);
+
 Route::middleware('jwt.auth')->group(function () {
 
-    // Auth routes - Các chức năng liên quan đến authentication
+    // Auth routes
     Route::apiResource('users', UserController::class);
     Route::apiResource('roles', RoleController::class);
 
@@ -50,13 +50,5 @@ Route::middleware('jwt.auth')->group(function () {
         Route::get('me', [AuthController::class, 'me']);
 
     });
-
-    // User CRUD routes - Quản lý users
-    // GET    /api/users       - Danh sách users
-    // POST   /api/users       - Tạo user mới
-    // GET    /api/users/{id}  - Chi tiết user
-    // PUT    /api/users/{id}  - Cập nhật user
-    // DELETE /api/users/{id}  - Xóa user
-
 });
 
