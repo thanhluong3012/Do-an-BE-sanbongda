@@ -35,8 +35,11 @@ class UserController extends Controller
         try {
                  // Validate
                 $validator = Validator::make($request->all(), [
+                    'role_id' => ['required','integer','exists:roles,id'],
                     'name' => ['required','string','max:255'],
                     'email' => ['required','email','max:255','unique:users,email'],
+                    'phone' => ['nullable','string','max:20'],
+                    'status' => ['nullable','boolean'],
                     'password' => ['required','string','min:6'],
                 ]);
 
@@ -46,8 +49,11 @@ class UserController extends Controller
 
                 // Create
                 User::create([
+                    'role_id' => $request->role_id,
                     'name' => $request->string('name'),
                     'email' => $request->string('email'),
+                    'phone' => $request->phone ?? null,
+                    'status' => $request->status ?? true,
                     'password' => Hash::make($request->string('password')),
                 ]);
 
@@ -83,8 +89,11 @@ class UserController extends Controller
 
             // Validate (update thì cho phép "sometimes")
             $validator = Validator::make($request->all(), [
+                'role_id' => ['sometimes','integer','exists:roles,id'],
                 'name' => ['sometimes','string','max:255'],
                 'email' => ['sometimes','email','max:255','unique:users,email,' . $user->id],
+                'phone' => ['nullable','string','max:20'],
+                'status' => ['sometimes','boolean'],
                 'password' => ['sometimes','string','min:6'],
             ]);
 
@@ -93,8 +102,11 @@ class UserController extends Controller
             }
 
             // Update fields nếu có gửi lên
+            if ($request->filled('role_id')) $user->role_id = $request->role_id;
             if ($request->filled('name')) $user->name = $request->string('name');
             if ($request->filled('email')) $user->email = $request->string('email');
+            if ($request->has('phone')) $user->phone = $request->phone;
+            if ($request->filled('status')) $user->status = $request->boolean('status');
             if ($request->filled('password')) $user->password = Hash::make($request->string('password'));
 
             $user->save();

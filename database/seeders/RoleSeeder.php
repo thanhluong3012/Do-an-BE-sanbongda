@@ -2,9 +2,9 @@
 
 namespace Database\Seeders;
 
-use App\Models\Role;
 use Illuminate\Database\Console\Seeds\WithoutModelEvents;
 use Illuminate\Database\Seeder;
+use Illuminate\Support\Facades\DB;
 
 class RoleSeeder extends Seeder
 {
@@ -15,26 +15,31 @@ class RoleSeeder extends Seeder
     {
         $roles = [
             [
-                'name' => Role::USER,
-                'description' => 'Người dùng thường - Có quyền cơ bản để sử dụng hệ thống'
+                'name_role' => 'admin',
+                'description' => 'Quản lý toàn bộ hệ thống',
+                'created_at' => now(),
+                'updated_at' => now(),
             ],
             [
-                'name' => Role::ADMIN,
-                'description' => 'Quản trị viên - Quản lý người dùng và nội dung'
+                'name_role' => 'owner',
+                'description' => 'Chủ sở hữu của một khu vực sân bóng',
+                'created_at' => now(),
+                'updated_at' => now(),
             ],
             [
-                'name' => Role::SUPERADMIN,
-                'description' => 'Quản trị cấp cao - Quản lý toàn bộ hệ thống bao gồm Admin'
+                'name_role' => 'staff',
+                'description' => 'Nhân viên thuộc khu vực sân bóng',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+            [
+                'name_role' => 'member',
+                'description' => 'Người dùng đã đăng nhập vào hệ thống',
+                'created_at' => now(),
+                'updated_at' => now(),
             ],
         ];
 
-        foreach ($roles as $role) {
-            Role::updateOrCreate(
-                ['name' => $role['name']],
-                ['description' => $role['description']]
-            );
-        }
-
-        $this->command->info('✅ Đã tạo 3 roles: user, admin, superadmin');
+        DB::table('roles')->insert($roles);
     }
 }

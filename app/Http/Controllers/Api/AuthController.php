@@ -40,10 +40,24 @@ class AuthController extends Controller
     {
         try {
             // Dữ liệu đã được validate tự động qua RegisterRequest
-            // Tạo user mới
+            // Tìm role "member" để gán mặc định cho user mới đăng ký
+            $memberRole = \App\Models\Role::where('name_role', 'member')->first();
+
+            if (!$memberRole) {
+                return ApiResponse::error(
+                    'Registration failed',
+                    'Role member không tồn tại trong hệ thống',
+                    500
+                );
+            }
+
+            // Tạo user mới với role "member" mặc định
            User::create([
+                'role_id' => $memberRole->id,
                 'name' => $request->name,
                 'email' => $request->email,
+                'phone' => $request->phone ?? null,
+                'status' => true, // Mặc định: active
                 'password' => Hash::make($request->password), // Hash password trước khi lưu
             ]);
 

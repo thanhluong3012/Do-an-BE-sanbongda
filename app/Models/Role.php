@@ -10,17 +10,12 @@ class Role extends Model
     use HasFactory;
 
     protected $fillable = [
-        'name',
+        'name_role',
         'description',
     ];
 
-    // Role constants for easy reference
-    public const USER = 'user';
-    public const ADMIN = 'admin';
-    public const SUPERADMIN = 'superadmin';
-
     /**
-     * Get users with this role
+     * Quan hệ với bảng users
      */
     public function users()
     {

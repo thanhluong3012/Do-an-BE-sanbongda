@@ -12,10 +12,12 @@ class User extends Authenticatable implements JWTSubject
     use HasFactory, Notifiable;
 
     protected $fillable = [
+        'role_id',
         'name',
         'email',
+        'phone',
+        'status',
         'password',
-        'role_id',
     ];
 
     protected $hidden = [
@@ -28,6 +30,22 @@ class User extends Authenticatable implements JWTSubject
     public function role()
     {
         return $this->belongsTo(Role::class);
+    }
+
+    /**
+     * Quan hệ với bảng owner_profiles - User có thể có 1 owner profile
+     */
+    public function ownerProfile()
+    {
+        return $this->hasOne(OwnerProfile::class);
+    }
+
+    /**
+     * Quan hệ với bảng staffs - User có thể là 1 staff
+     */
+    public function staff()
+    {
+        return $this->hasOne(Staff::class);
     }
 
     /**

@@ -1,0 +1,31 @@
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    /**
+     * Run the migrations.
+     */
+    public function up(): void
+    {
+        Schema::create('staffs', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('user_id')->constrained('users')->onDelete('cascade');
+            $table->foreignId('owner_id')->constrained('owner_profiles')->onDelete('cascade')->comment('Chủ sân quản lý nhân viên này');
+            $table->string('code_id', 20)->nullable()->comment('Căn cước công dân');
+            $table->string('avatar')->nullable()->comment('Ảnh đại diện');
+            $table->timestamps();
+        });
+    }
+
+    /**
+     * Reverse the migrations.
+     */
+    public function down(): void
+    {
+        Schema::dropIfExists('staffs');
+    }
+};

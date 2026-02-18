@@ -15,11 +15,19 @@ class DatabaseSeeder extends Seeder
      */
     public function run(): void
     {
+        // Chạy RoleSeeder trước, sau đó AdminSeeder, OwnerSeeder, StaffSeeder
+        $this->call([
+            RoleSeeder::class,
+            AdminSeeder::class,
+            OwnerSeeder::class,
+            StaffSeeder::class,
+        ]);
+
         // User::factory(10)->create();
 
-        User::factory()->create([
-            'name' => 'Test User',
-            'email' => 'test@example.com',
-        ]);
+        // User::factory()->create([
+        //     'name' => 'Test User',
+        //     'email' => 'test@example.com',
+        // ]);
     }
 }
