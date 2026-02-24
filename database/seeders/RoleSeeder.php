@@ -17,29 +17,30 @@ class RoleSeeder extends Seeder
             [
                 'name_role' => 'admin',
                 'description' => 'Quản lý toàn bộ hệ thống',
-                'created_at' => now(),
-                'updated_at' => now(),
             ],
             [
                 'name_role' => 'owner',
                 'description' => 'Chủ sở hữu của một khu vực sân bóng',
-                'created_at' => now(),
-                'updated_at' => now(),
             ],
             [
                 'name_role' => 'staff',
                 'description' => 'Nhân viên thuộc khu vực sân bóng',
-                'created_at' => now(),
-                'updated_at' => now(),
             ],
             [
                 'name_role' => 'member',
                 'description' => 'Người dùng đã đăng nhập vào hệ thống',
-                'created_at' => now(),
-                'updated_at' => now(),
             ],
         ];
 
-        DB::table('roles')->insert($roles);
+        foreach ($roles as $role) {
+            DB::table('roles')->updateOrInsert(
+                ['name_role' => $role['name_role']],
+                [
+                    'description' => $role['description'],
+                    'updated_at' => now(),
+                    'created_at' => DB::raw('COALESCE(created_at, NOW())'),
+                ]
+            );
+        }
     }
 }

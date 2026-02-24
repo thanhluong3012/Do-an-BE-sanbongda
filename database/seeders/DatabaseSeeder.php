@@ -21,6 +21,9 @@ class DatabaseSeeder extends Seeder
             AdminSeeder::class,
             OwnerSeeder::class,
             StaffSeeder::class,
+            FieldClusterSeeder::class,
+            FieldSeeder::class,
+            FieldHourlyPriceSeeder::class,
         ]);
 
         // User::factory(10)->create();

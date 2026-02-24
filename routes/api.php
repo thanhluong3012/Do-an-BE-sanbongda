@@ -9,6 +9,9 @@ use App\Http\Controllers\Api\RoleController;
 use App\Http\Controllers\Api\OwnerController;
 use App\Http\Controllers\Api\StaffController;
 use App\Http\Controllers\Api\OwnerRegistrationController;
+use App\Http\Controllers\Api\FieldHourlyPriceController;
+use App\Http\Controllers\Api\FieldClusterController;
+use App\Http\Controllers\Api\FieldController;
 
 
 Route::prefix('auth')->group(function () {
@@ -32,16 +35,18 @@ Route::middleware('jwt.auth')->group(function () {
         Route::get('me', [AuthController::class, 'me']);
     });
 
-    // User management - CHỈ ADMIN
+    // User & Role management - CHỈ ADMIN
     Route::middleware('check.role:admin')->group(function () {
         Route::apiResource('users', UserController::class);
         Route::apiResource('roles', RoleController::class);
+    });
 
-        // Quản lý yêu cầu đăng ký chủ sân
+    // Owner Registration management - CHỈ ADMIN
+    Route::prefix('admin')->middleware('check.role:admin')->group(function () {
         Route::get('owner-registrations', [OwnerRegistrationController::class, 'index']);
         Route::get('owner-registrations/{id}', [OwnerRegistrationController::class, 'show']);
-        Route::post('owner-registrations/{id}/approve', [OwnerRegistrationController::class, 'approve']);
-        Route::post('owner-registrations/{id}/reject', [OwnerRegistrationController::class, 'reject']);
+        Route::put('owner-registrations/{id}/approve', [OwnerRegistrationController::class, 'approve']);
+        Route::put('owner-registrations/{id}/reject', [OwnerRegistrationController::class, 'reject']);
         Route::delete('owner-registrations/{id}', [OwnerRegistrationController::class, 'destroy']);
     });
 
@@ -49,6 +54,9 @@ Route::middleware('jwt.auth')->group(function () {
     Route::middleware('check.role:admin,owner')->group(function () {
         Route::apiResource('owners', OwnerController::class);
         Route::apiResource('staffs', StaffController::class);
+        Route::apiResource('field-clusters', FieldClusterController::class);
+        Route::apiResource('fields', FieldController::class);
+        Route::apiResource('field-hourly-prices', FieldHourlyPriceController::class);
     });
 });
 

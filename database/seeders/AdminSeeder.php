@@ -23,17 +23,19 @@ class AdminSeeder extends Seeder
             return;
         }
 
-        // Tạo tài khoản admin
-        User::create([
-            'role_id' => $adminRole->id,
-            'name' => 'Admin System',
-            'email' => 'admin@sanbongda.com',
-            'phone' => '0900000000',
-            'status' => true,
-            'password' => Hash::make('admin123'), // Password: admin123
-        ]);
+        // Tạo hoặc cập nhật tài khoản admin
+        User::updateOrCreate(
+            ['email' => 'admin@sanbongda.com'],
+            [
+                'role_id' => $adminRole->id,
+                'name' => 'Admin System',
+                'phone' => '0900000000',
+                'status' => true,
+                'password' => Hash::make('admin123'), // Password: admin123
+            ]
+        );
 
-        $this->command->info('✅ Tạo tài khoản admin thành công!');
+        $this->command->info('Tạo tài khoản admin thành công!');
         $this->command->info('Email: admin@sanbongda.com');
         $this->command->info('Password: admin123');
     }

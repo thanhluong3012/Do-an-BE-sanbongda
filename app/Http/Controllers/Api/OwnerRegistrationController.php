@@ -7,11 +7,15 @@ use App\Models\OwnerRegistration;
 use App\Models\User;
 use App\Models\Role;
 use App\Models\OwnerProfile;
+use App\Mail\OwnerRegistrationApprovedMail;
+use App\Mail\OwnerRegistrationRejectedMail;
 use App\Helpers\ApiResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Log;
 use Exception;
 
 class OwnerRegistrationController extends Controller
@@ -108,109 +112,133 @@ class OwnerRegistrationController extends Controller
      * Tạo User + OwnerProfile
      */
     public function approve(string $id)
-    {
-        DB::beginTransaction();
-        try {
-            $registration = OwnerRegistration::find($id);
+{
+    DB::beginTransaction();
 
-            if (!$registration) {
-                return ApiResponse::error('Không tìm thấy yêu cầu', null, 404);
-            }
+    try {
+        $registration = OwnerRegistration::find($id);
 
-            if ($registration->status !== 'pending') {
-                return ApiResponse::error('Yêu cầu đã được xử lý trước đó', null, 400);
-            }
-
-            // Tìm role owner
-            $ownerRole = Role::where('name_role', 'owner')->first();
-            if (!$ownerRole) {
-                DB::rollBack();
-                return ApiResponse::error('Role owner không tồn tại', null, 500);
-            }
-
-            // Tạo User
-            $user = User::create([
-                'role_id' => $ownerRole->id,
-                'name' => $registration->name,
-                'email' => $registration->email,
-                'phone' => $registration->phone,
-                'password' => $registration->password, // Đã hash rồi
-                'status' => true,
-            ]);
-
-            // Tạo OwnerProfile
-            $ownerProfile = OwnerProfile::create([
-                'user_id' => $user->id,
-                'image_code' => $registration->image_code,
-                'code_id' => $registration->code_id,
-            ]);
-
-            // Cập nhật registration
-            $registration->update([
-                'status' => 'approved',
-                'approved_by' => auth('api')->id(),
-                'approved_at' => now(),
-            ]);
-
-            DB::commit();
-
-            // TODO: Gửi email thông báo "Tài khoản đã được duyệt"
-
-            return ApiResponse::success(
-                'Đã duyệt yêu cầu thành công',
-                [
-                    'user' => $user,
-                    'owner_profile' => $ownerProfile,
-                ],
-                200
-            );
-        } catch (Exception $e) {
-            DB::rollBack();
-            return ApiResponse::error('Duyệt yêu cầu thất bại', $e->getMessage(), 500);
+        if (!$registration) {
+            return ApiResponse::error('Không tìm thấy yêu cầu', null, 404);
         }
+
+        if ($registration->status !== 'pending') {
+            return ApiResponse::error('Yêu cầu đã được xử lý trước đó', null, 400);
+        }
+
+        $ownerRole = Role::where('name_role', 'owner')->first();
+        if (!$ownerRole) {
+            DB::rollBack();
+            return ApiResponse::error('Role owner không tồn tại', null, 500);
+        }
+
+        $user = User::create([
+            'role_id' => $ownerRole->id,
+            'name' => $registration->name,
+            'email' => $registration->email,
+            'phone' => $registration->phone,
+            'password' => $registration->password, // đã hash
+            'status' => true,
+        ]);
+
+        $ownerProfile = OwnerProfile::create([
+            'user_id' => $user->id,
+            'business_name' => $registration->business_name,
+            'address' => $registration->address,
+            'image_code' => $registration->image_code,
+            'code_id' => $registration->code_id,
+        ]);
+
+        $registration->update([
+            'status' => 'approved',
+            'approved_by' => auth('api')->id(),
+            'approved_at' => now(),
+        ]);
+
+        DB::commit();
+
+        // GỬI EMAIL SAU KHI COMMIT - không ảnh hưởng transaction
+        try {
+            Mail::to($registration->email)->queue(
+                new OwnerRegistrationApprovedMail(
+                    $registration->name,
+                    $registration->business_name
+                )
+            );
+        } catch (Exception $mailException) {
+            // Log lỗi email nhưng vẫn trả về success
+            Log::error('Failed to queue approval email: ' . $mailException->getMessage());
+        }
+
+        return ApiResponse::success(
+            'Đã duyệt và gửi email thông báo',
+            [
+                'user' => $user,
+                'owner_profile' => $ownerProfile,
+            ],
+            200
+        );
+    } catch (Exception $e) {
+        DB::rollBack();
+        return ApiResponse::error('Duyệt yêu cầu thất bại', $e->getMessage(), 500);
     }
+}
 
     /**
      * Admin TỪ CHỐI yêu cầu đăng ký
      */
     public function reject(Request $request, string $id)
-    {
-        try {
-            $registration = OwnerRegistration::find($id);
+{
+    DB::beginTransaction();
 
-            if (!$registration) {
-                return ApiResponse::error('Không tìm thấy yêu cầu', null, 404);
-            }
+    try {
+        $registration = OwnerRegistration::find($id);
 
-            if ($registration->status !== 'pending') {
-                return ApiResponse::error('Yêu cầu đã được xử lý trước đó', null, 400);
-            }
-
-            // Validate lý do từ chối
-            $validator = Validator::make($request->all(), [
-                'rejected_reason' => ['required', 'string'],
-            ]);
-
-            if ($validator->fails()) {
-                return ApiResponse::error('Vui lòng nhập lý do từ chối', $validator->errors(), 422);
-            }
-
-            // Cập nhật status
-            $registration->update([
-                'status' => 'rejected',
-                'rejected_reason' => $request->rejected_reason,
-                'approved_by' => auth('api')->id(),
-                'approved_at' => now(),
-            ]);
-
-            // TODO: Gửi email thông báo "Yêu cầu bị từ chối vì: ..."
-
-            return ApiResponse::success('Đã từ chối yêu cầu', $registration, 200);
-        } catch (Exception $e) {
-            return ApiResponse::error('Từ chối yêu cầu thất bại', $e->getMessage(), 500);
+        if (!$registration) {
+            return ApiResponse::error('Không tìm thấy yêu cầu', null, 404);
         }
-    }
 
+        if ($registration->status !== 'pending') {
+            return ApiResponse::error('Yêu cầu đã được xử lý trước đó', null, 400);
+        }
+
+        $validator = Validator::make($request->all(), [
+            'rejected_reason' => ['required', 'string'],
+        ]);
+
+        if ($validator->fails()) {
+            return ApiResponse::error('Vui lòng nhập lý do từ chối', $validator->errors(), 422);
+        }
+
+        $registration->update([
+            'status'          => 'rejected',
+            'rejected_reason' => $request->rejected_reason,
+            'approved_by'     => auth('api')->id(),
+            'approved_at'     => now(),
+        ]);
+
+        DB::commit();
+
+        // GỬI EMAIL SAU KHI COMMIT - không ảnh hưởng transaction
+        try {
+            Mail::to($registration->email)->queue(
+                new OwnerRegistrationRejectedMail(
+                    $registration->name,
+                    $registration->business_name,
+                    $request->rejected_reason
+                )
+            );
+        } catch (Exception $mailException) {
+            // Log lỗi email nhưng vẫn trả về success
+            Log::error('Failed to queue rejection email: ' . $mailException->getMessage());
+        }
+
+        return ApiResponse::success('Đã từ chối và gửi email thông báo', $registration, 200);
+    } catch (Exception $e) {
+        DB::rollBack();
+        return ApiResponse::error('Từ chối yêu cầu thất bại', $e->getMessage(), 500);
+    }
+}
     /**
      * Remove the specified resource from storage.
      * Xóa yêu cầu (nếu cần)
