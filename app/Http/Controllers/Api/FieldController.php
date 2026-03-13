@@ -208,4 +208,36 @@ class FieldController extends Controller
             return ApiResponse::error('Xóa thất bại', $e->getMessage(), 500);
         }
     }
+
+    /**
+     * Public API - Danh sách sân con cho khách hàng (không cần đăng nhập)
+     */
+    public function publicIndex()
+    {
+        try {
+            $fields = Field::with('fieldCluster')->get();
+
+            return ApiResponse::success('Danh sách sân con', $fields, 200);
+        } catch (Exception $e) {
+            return ApiResponse::error('Lấy danh sách thất bại', $e->getMessage(), 500);
+        }
+    }
+
+    /**
+     * Public API - Chi tiết sân con cho khách hàng (không cần đăng nhập)
+     */
+    public function publicShow(string $id)
+    {
+        try {
+            $field = Field::with('fieldCluster')->find($id);
+
+            if (!$field) {
+                return ApiResponse::error('Không tìm thấy sân con', null, 404);
+            }
+
+            return ApiResponse::success('Chi tiết sân con', $field, 200);
+        } catch (Exception $e) {
+            return ApiResponse::error('Lấy thông tin thất bại', $e->getMessage(), 500);
+        }
+    }
 }

@@ -159,15 +159,23 @@ class OwnerRegistrationController extends Controller
 
         // GỬI EMAIL SAU KHI COMMIT - không ảnh hưởng transaction
         try {
-            Mail::to($registration->email)->queue(
+            Log::info('=== BẮT ĐẦU GỬI EMAIL APPROVE ===');
+            Log::info('Email to: ' . $registration->email);
+            Log::info('Name: ' . $registration->name);
+            Log::info('Business: ' . $registration->business_name);
+
+            Mail::to($registration->email)->send(
                 new OwnerRegistrationApprovedMail(
                     $registration->name,
                     $registration->business_name
                 )
             );
+
+            Log::info('✅ EMAIL APPROVE ĐÃ GỬI THÀNH CÔNG');
         } catch (Exception $mailException) {
             // Log lỗi email nhưng vẫn trả về success
-            Log::error('Failed to queue approval email: ' . $mailException->getMessage());
+            Log::error('❌ FAILED to send approval email: ' . $mailException->getMessage());
+            Log::error('Stack trace: ' . $mailException->getTraceAsString());
         }
 
         return ApiResponse::success(
@@ -221,16 +229,25 @@ class OwnerRegistrationController extends Controller
 
         // GỬI EMAIL SAU KHI COMMIT - không ảnh hưởng transaction
         try {
-            Mail::to($registration->email)->queue(
+            Log::info('=== BẮT ĐẦU GỬI EMAIL REJECT ===');
+            Log::info('Email to: ' . $registration->email);
+            Log::info('Name: ' . $registration->name);
+            Log::info('Business: ' . $registration->business_name);
+            Log::info('Reason: ' . $request->rejected_reason);
+
+            Mail::to($registration->email)->send(
                 new OwnerRegistrationRejectedMail(
                     $registration->name,
                     $registration->business_name,
                     $request->rejected_reason
                 )
             );
+
+            Log::info('✅ EMAIL REJECT ĐÃ GỬI THÀNH CÔNG');
         } catch (Exception $mailException) {
             // Log lỗi email nhưng vẫn trả về success
-            Log::error('Failed to queue rejection email: ' . $mailException->getMessage());
+            Log::error('❌ FAILED to send rejection email: ' . $mailException->getMessage());
+            Log::error('Stack trace: ' . $mailException->getTraceAsString());
         }
 
         return ApiResponse::success('Đã từ chối và gửi email thông báo', $registration, 200);

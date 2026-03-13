@@ -228,4 +228,36 @@ class FieldHourlyPriceController extends Controller
             return ApiResponse::error('Xóa thất bại', $e->getMessage(), 500);
         }
     }
+
+    /**
+     * Public API - Danh sách giá theo giờ cho khách hàng (không cần đăng nhập)
+     */
+    public function publicIndex()
+    {
+        try {
+            $prices = FieldHourlyPrice::with('fieldCluster')->get();
+
+            return ApiResponse::success('Danh sách giá theo giờ', $prices, 200);
+        } catch (Exception $e) {
+            return ApiResponse::error('Lấy danh sách thất bại', $e->getMessage(), 500);
+        }
+    }
+
+    /**
+     * Public API - Chi tiết giá theo giờ cho khách hàng (không cần đăng nhập)
+     */
+    public function publicShow(string $id)
+    {
+        try {
+            $price = FieldHourlyPrice::with('fieldCluster')->find($id);
+
+            if (!$price) {
+                return ApiResponse::error('Không tìm thấy giá theo giờ', null, 404);
+            }
+
+            return ApiResponse::success('Chi tiết giá theo giờ', $price, 200);
+        } catch (Exception $e) {
+            return ApiResponse::error('Lấy thông tin thất bại', $e->getMessage(), 500);
+        }
+    }
 }

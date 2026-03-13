@@ -49,6 +49,14 @@ class User extends Authenticatable implements JWTSubject
     }
 
     /**
+     * Quan hệ với bảng books - User có thể có nhiều đặt sân
+     */
+    public function books()
+    {
+        return $this->hasMany(Book::class);
+    }
+
+    /**
      * JWT: return the identifier stored in the token
      */
     public function getJWTIdentifier()

@@ -228,4 +228,37 @@ class FieldClusterController extends Controller
             return ApiResponse::error('Xóa thất bại', $e->getMessage(), 500);
         }
     }
+
+    /**
+     * Public API - Danh sách cụm sân cho khách hàng (không cần đăng nhập)
+     */
+    public function publicIndex()
+    {
+        try {
+            $clusters = FieldCluster::with(['fields', 'hourlyPrices'])
+                ->get();
+
+            return ApiResponse::success('Danh sách cụm sân', $clusters, 200);
+        } catch (Exception $e) {
+            return ApiResponse::error('Lấy danh sách thất bại', $e->getMessage(), 500);
+        }
+    }
+
+    /**
+     * Public API - Chi tiết cụm sân cho khách hàng (không cần đăng nhập)
+     */
+    public function publicShow(string $id)
+    {
+        try {
+            $cluster = FieldCluster::with(['fields', 'hourlyPrices'])->find($id);
+
+            if (!$cluster) {
+                return ApiResponse::error('Không tìm thấy cụm sân', null, 404);
+            }
+
+            return ApiResponse::success('Chi tiết cụm sân', $cluster, 200);
+        } catch (Exception $e) {
+            return ApiResponse::error('Lấy thông tin thất bại', $e->getMessage(), 500);
+        }
+    }
 }
