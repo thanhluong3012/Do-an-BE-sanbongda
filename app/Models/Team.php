@@ -42,4 +42,20 @@ class Team extends Model
     {
         return $this->hasMany(TournamentMatch::class, 'away_team_id');
     }
+
+    /**
+     * Thành viên của đội (không bao gồm captain)
+     */
+    public function members(): HasMany
+    {
+        return $this->hasMany(TeamMember::class);
+    }
+
+    /**
+     * Tổng số người trong đội (captain + members)
+     */
+    public function totalMembersCount(): int
+    {
+        return $this->members()->count() + 1; // +1 cho captain
+    }
 }

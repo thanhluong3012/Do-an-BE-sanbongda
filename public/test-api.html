@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Public Tournament API</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        .result { margin-top: 20px; padding: 15px; background: #f5f5f5; border-radius: 5px; }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+        button { padding: 10px 20px; margin: 5px; cursor: pointer; }
+        pre { white-space: pre-wrap; word-wrap: break-word; }
+    </style>
+</head>
+<body>
+    <h1>🧪 Test Public Tournament API</h1>
+
+    <h2>Test Cases:</h2>
+    <button onclick="testPublicTournaments()">✅ Test /api/public/tournaments</button>
+    <button onclick="testAuthTournaments()">❌ Test /api/tournaments (should fail)</button>
+    <button onclick="testPublicTournamentDetail()">✅ Test /api/public/tournaments/{id}</button>
+
+    <div id="result" class="result"></div>
+
+    <script>
+        const API_BASE = window.location.origin;
+
+        async function testPublicTournaments() {
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = '<p>Testing GET /api/public/tournaments...</p>';
+
+            try {
+                const response = await fetch(`${API_BASE}/api/public/tournaments`, {
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    resultDiv.className = 'result success';
+                    resultDiv.innerHTML = `
+                        <h3>✅ SUCCESS - Status: ${response.status}</h3>
+                        <p><strong>URL:</strong> ${API_BASE}/api/public/tournaments</p>
+                        <p><strong>Message:</strong> ${data.message}</p>
+                        <p><strong>Found ${data.data.data.length} tournaments</strong></p>
+                        <h4>First Tournament:</h4>
+                        <pre>${JSON.stringify(data.data.data[0], null, 2)}</pre>
+                    `;
+                } else {
+                    throw new Error(`HTTP ${response.status}: ${data.message || 'Unknown error'}`);
+                }
+            } catch (error) {
+                resultDiv.className = 'result error';
+                resultDiv.innerHTML = `
+                    <h3>❌ ERROR</h3>
+                    <p><strong>URL:</strong> ${API_BASE}/api/public/tournaments</p>
+                    <p><strong>Error:</strong> ${error.message}</p>
+                `;
+            }
+        }
+
+        async function testAuthTournaments() {
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = '<p>Testing GET /api/tournaments (without token)...</p>';
+
+            try {
+                const response = await fetch(`${API_BASE}/api/tournaments`, {
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                const data = await response.json();
+
+                if (response.status === 401) {
+                    resultDiv.className = 'result success';
+                    resultDiv.innerHTML = `
+                        <h3>✅ EXPECTED BEHAVIOR - Status: 401 Unauthorized</h3>
+                        <p><strong>URL:</strong> ${API_BASE}/api/tournaments</p>
+                        <p><strong>Message:</strong> ${data.message}</p>
+                        <p>This endpoint requires authentication (correct behavior)</p>
+                    `;
+                } else {
+                    resultDiv.className = 'result error';
+                    resultDiv.innerHTML = `
+                        <h3>⚠️ UNEXPECTED - Status: ${response.status}</h3>
+                        <p>Expected 401 but got ${response.status}</p>
+                        <pre>${JSON.stringify(data, null, 2)}</pre>
+                    `;
+                }
+            } catch (error) {
+                resultDiv.className = 'result error';
+                resultDiv.innerHTML = `
+                    <h3>❌ NETWORK ERROR</h3>
+                    <p><strong>Error:</strong> ${error.message}</p>
+                `;
+            }
+        }
+
+        async function testPublicTournamentDetail() {
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = '<p>Testing GET /api/public/tournaments/5...</p>';
+
+            try {
+                const response = await fetch(`${API_BASE}/api/public/tournaments/5`, {
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    resultDiv.className = 'result success';
+                    resultDiv.innerHTML = `
+                        <h3>✅ SUCCESS - Status: ${response.status}</h3>
+                        <p><strong>URL:</strong> ${API_BASE}/api/public/tournaments/5</p>
+                        <p><strong>Tournament:</strong> ${data.data.name}</p>
+                        <p><strong>Status:</strong> ${data.data.status}</p>
+                        <p><strong>Registrations:</strong> ${data.data.registrations?.length || 0}</p>
+                        <pre>${JSON.stringify(data.data, null, 2)}</pre>
+                    `;
+                } else {
+                    throw new Error(`HTTP ${response.status}: ${data.message || 'Unknown error'}`);
+                }
+            } catch (error) {
+                resultDiv.className = 'result error';
+                resultDiv.innerHTML = `
+                    <h3>❌ ERROR</h3>
+                    <p><strong>Error:</strong> ${error.message}</p>
+                `;
+            }
+        }
+
+        // Auto run first test on load
+        window.addEventListener('load', () => {
+            testPublicTournaments();
+        });
+    </script>
+</body>
+</html>
+

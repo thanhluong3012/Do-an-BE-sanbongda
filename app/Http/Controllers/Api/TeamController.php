@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Team;
+use App\Models\TeamMember;
 use App\Helpers\ApiResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -33,6 +34,35 @@ class TeamController extends Controller
     public function store(Request $request)
     {
         try {
+            $user = Auth::user();
+            $userId = $user->id;
+
+            // ✅ KIỂM TRA 1: User đã là đội trưởng của đội nào chưa
+            $existingTeam = Team::where('captain_user_id', $userId)->first();
+            if ($existingTeam) {
+                return ApiResponse::error(
+                    'Bạn đã là đội trưởng của đội "' . $existingTeam->name . '". Mỗi người chỉ được tạo 1 đội bóng.',
+                    ['existing_team_id' => $existingTeam->id],
+                    400
+                );
+            }
+
+            // ✅ KIỂM TRA 2: Nếu user có CCCD, kiểm tra CCCD có trong team_members không
+            if ($user->code_id) {
+                $membershipExists = TeamMember::where('code_id', $user->code_id)->first();
+                if ($membershipExists) {
+                    $team = Team::find($membershipExists->team_id);
+                    return ApiResponse::error(
+                        'CCCD của bạn đã tham gia đội "' . ($team ? $team->name : 'khác') . '" với vai trò thành viên. Vui lòng rời khỏi đội hiện tại trước khi tạo đội mới.',
+                        [
+                            'existing_team_id' => $membershipExists->team_id,
+                            'member_name' => $membershipExists->player_name
+                        ],
+                        400
+                    );
+                }
+            }
+
             $validated = $request->validate([
                 'name' => 'required|string|max:255|unique:teams,name',
                 'short_name' => 'nullable|string|max:50',
@@ -41,7 +71,7 @@ class TeamController extends Controller
                 'contact_email' => 'nullable|email',
             ]);
 
-            $validated['captain_user_id'] = Auth::id();
+            $validated['captain_user_id'] = $userId;
 
             $team = Team::create($validated);
 

@@ -87,7 +87,7 @@ class BookController extends Controller
                 return ApiResponse::error('Sân không khả dụng để đặt', null, 400);
             }
 
-            // Kiểm tra trùng lịch
+            // Kiểm tra trùng lịch (bao gồm cả tournament bookings và regular bookings)
             $conflictBooking = Book::where('field_id', $request->field_id)
                 ->where('day_book', $request->day_book)
                 ->where(function ($query) use ($request) {
@@ -106,6 +106,7 @@ class BookController extends Controller
 
             $book = Book::create([
                 'user_id' => $currentUser->id,
+                'booking_type' => 'regular',
                 'field_id' => $request->field_id,
                 'day_book' => $request->day_book,
                 'start_time' => $request->start_time,

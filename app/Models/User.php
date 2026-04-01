@@ -16,6 +16,7 @@ class User extends Authenticatable implements JWTSubject
         'name',
         'email',
         'phone',
+        'code_id',
         'status',
         'password',
     ];
@@ -54,6 +55,14 @@ class User extends Authenticatable implements JWTSubject
     public function books()
     {
         return $this->hasMany(Book::class);
+    }
+
+    /**
+     * Các đội mà user là captain (đội trưởng)
+     */
+    public function captainOfTeams()
+    {
+        return $this->hasMany(Team::class, 'captain_user_id');
     }
 
     /**

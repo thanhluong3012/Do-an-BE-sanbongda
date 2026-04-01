@@ -70,9 +70,11 @@ class TournamentRegistrationController extends Controller
             }
 
             // Kiểm tra đã đủ số đội chưa
-            $approvedCount = $tournament->registrations()->where('registration_status', 'approved')->count();
-            if ($approvedCount >= $tournament->max_teams) {
-                return ApiResponse::error('Giải đã đủ số đội', 400);
+            if ($tournament->isFull()) {
+                return ApiResponse::error(
+                    "Giải đã đủ số đội ({$tournament->max_teams}/{$tournament->max_teams})",
+                    400
+                );
             }
 
             // Kiểm tra đội đã đăng ký chưa
@@ -89,6 +91,22 @@ class TournamentRegistrationController extends Controller
             $team = \App\Models\Team::findOrFail($validated['team_id']);
             if ($team->captain_user_id !== $user->id) {
                 return ApiResponse::error('Chỉ đội trưởng mới có thể đăng ký', 403);
+            }
+
+            // Kiểm tra đội có đủ số người không (captain + members)
+            $totalMembers = $team->totalMembersCount();
+            $minPlayers = match($tournament->field_type) {
+                '5v5' => 5,
+                '7v7' => 7,
+                '11v11' => 11,
+                default => 5,
+            };
+
+            if ($totalMembers < $minPlayers) {
+                return ApiResponse::error(
+                    "Đội phải có ít nhất {$minPlayers} cầu thủ để đăng ký giải {$tournament->field_type}. Hiện tại đội có: {$totalMembers} người (bao gồm đội trưởng)",
+                    400
+                );
             }
 
             $registration = TournamentRegistration::create($validated);
@@ -120,10 +138,10 @@ class TournamentRegistrationController extends Controller
         try {
             $registration = TournamentRegistration::with('tournament')->findOrFail($id);
 
-            // Check permission: phải là BTC hoặc admin
+            // Chỉ organizer (người tổ chức giải) mới được duyệt đăng ký
             $user = Auth::user();
-            if ($user->role->name !== 'admin' && $registration->tournament->user_id !== $user->id) {
-                return ApiResponse::error('Không có quyền duyệt đăng ký', 403);
+            if ($registration->tournament->organizer_id !== $user->id) {
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền duyệt đăng ký', 403);
             }
 
             if ($registration->registration_status !== 'pending') {
@@ -153,9 +171,10 @@ class TournamentRegistrationController extends Controller
         try {
             $registration = TournamentRegistration::with('tournament')->findOrFail($id);
 
+            // Chỉ organizer mới được từ chối đăng ký
             $user = Auth::user();
-            if ($user->role->name !== 'admin' && $registration->tournament->user_id !== $user->id) {
-                return ApiResponse::error('Không có quyền từ chối đăng ký', 403);
+            if ($registration->tournament->organizer_id !== $user->id) {
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền từ chối đăng ký', 403);
             }
 
             $validated = $request->validate([
@@ -180,9 +199,9 @@ class TournamentRegistrationController extends Controller
             $registration = TournamentRegistration::with('tournament', 'team')->findOrFail($id);
             $user = Auth::user();
 
-            // Chỉ đội trưởng hoặc admin mới xóa được
-            if ($user->role->name !== 'admin' && $registration->team->captain_user_id !== $user->id) {
-                return ApiResponse::error('Không có quyền', 403);
+            // Chỉ đội trưởng của đội đó mới được rút đăng ký
+            if ($registration->team->captain_user_id !== $user->id) {
+                return ApiResponse::error('Chỉ đội trưởng mới có quyền rút đăng ký', 403);
             }
 
             // Chỉ rút được khi pending hoặc tự rút khi approved

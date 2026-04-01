@@ -14,9 +14,13 @@ use App\Http\Controllers\Api\FieldClusterController;
 use App\Http\Controllers\Api\FieldController;
 use App\Http\Controllers\Api\BookController;
 use App\Http\Controllers\Api\TeamController;
+use App\Http\Controllers\Api\TeamMemberController;
 use App\Http\Controllers\Api\TournamentController;
 use App\Http\Controllers\Api\TournamentRegistrationController;
 use App\Http\Controllers\Api\TournamentMatchController;
+use App\Http\Controllers\Api\TournamentRoundController;
+use App\Http\Controllers\Api\TournamentGroupController;
+use App\Http\Controllers\Api\TournamentSessionPriceController;
 
 
 // ==========================================
@@ -48,6 +52,10 @@ Route::prefix('public')->group(function () {
     // Giá sân theo giờ
     Route::get('field-hourly-prices', [FieldHourlyPriceController::class, 'publicIndex']);
     Route::get('field-hourly-prices/{id}', [FieldHourlyPriceController::class, 'publicShow']);
+
+    // Giải đấu (chỉ xem, không đăng ký)
+    Route::get('tournaments', [TournamentController::class, 'publicIndex']);
+    Route::get('tournaments/{id}', [TournamentController::class, 'publicShow']);
 });
 
 
@@ -109,6 +117,9 @@ Route::middleware('jwt.auth')->group(function () {
         Route::post('field-hourly-prices', [FieldHourlyPriceController::class, 'store']);
         Route::put('field-hourly-prices/{id}', [FieldHourlyPriceController::class, 'update']);
         Route::delete('field-hourly-prices/{id}', [FieldHourlyPriceController::class, 'destroy']);
+
+        // QUẢN LÝ Giá giải đấu (Tạo, Sửa, Xóa)
+        Route::apiResource('tournament-session-prices', TournamentSessionPriceController::class)->except(['show']);
     });
 
     // ==========================================
@@ -126,6 +137,10 @@ Route::middleware('jwt.auth')->group(function () {
     Route::get('field-hourly-prices', [FieldHourlyPriceController::class, 'index']);
     Route::get('field-hourly-prices/{id}', [FieldHourlyPriceController::class, 'show']);
 
+    // Xem giá giải đấu
+    Route::get('tournament-session-prices', [TournamentSessionPriceController::class, 'index']);
+    Route::get('tournament-session-prices/{id}', [TournamentSessionPriceController::class, 'show']);
+
     // ==========================================
     // Booking (Đặt sân) - Tất cả user đã đăng nhập
     // ==========================================
@@ -136,13 +151,44 @@ Route::middleware('jwt.auth')->group(function () {
     // ==========================================
     Route::apiResource('teams', TeamController::class);
 
+    // Quản lý thành viên đội
+    Route::prefix('teams/{team_id}')->group(function () {
+        Route::get('members', [TeamMemberController::class, 'index']);
+        Route::post('members', [TeamMemberController::class, 'store']);
+        Route::get('members/{id}', [TeamMemberController::class, 'show']);
+        Route::put('members/{id}', [TeamMemberController::class, 'update']);
+        Route::delete('members/{id}', [TeamMemberController::class, 'destroy']);
+    });
+
     // ==========================================
-    // Tournament (Giải đấu) - Tất cả user đã đăng nhập
+    // Tournament (Giải đấu) - Cần đăng nhập để tạo/sửa/xóa
     // ==========================================
-    Route::apiResource('tournaments', TournamentController::class);
+    // Xem danh sách và chi tiết không cần auth (đã có ở public routes)
+    Route::get('tournaments', [TournamentController::class, 'index']); // User đã login xem theo quyền
+    Route::post('tournaments', [TournamentController::class, 'store']);
+    Route::get('tournaments/{tournament}', [TournamentController::class, 'show']); // User đã login xem theo quyền
+    Route::put('tournaments/{tournament}', [TournamentController::class, 'update']);
+
+    // ==========================================
+    // Booking sân cho giải đấu
+    // ==========================================
+    Route::post('tournaments/{id}/book-fields', [TournamentController::class, 'bookFields']);
+    Route::get('tournaments/{id}/field-bookings', [TournamentController::class, 'getFieldBookings']);
+    Route::delete('tournaments/{id}/field-bookings/{booking_id}', [TournamentController::class, 'deleteFieldBooking']);
+    Route::delete('tournaments/{tournament}', [TournamentController::class, 'destroy']);
 
     // Routes đặc biệt cho giải đấu
     Route::post('tournaments/{id}/publish', [TournamentController::class, 'publish']);
+
+    // ==========================================
+    // Lịch thi đấu & Bracket
+    // ==========================================
+    // Tự động sinh lịch (1 nút bấm)
+    Route::post('tournaments/{id}/generate-schedule', [TournamentController::class, 'generateSchedule']);
+    // Lấy bracket/lịch để FE render sơ đồ
+    Route::get('tournaments/{id}/bracket', [TournamentController::class, 'getBracket']);
+    // Xóa toàn bộ lịch để tạo lại
+    Route::delete('tournaments/{id}/schedule', [TournamentController::class, 'resetSchedule']);
 
     // ==========================================
     // Tournament Registration (Đăng ký giải đấu) - Tất cả user đã đăng nhập
@@ -160,5 +206,16 @@ Route::middleware('jwt.auth')->group(function () {
 
     // Routes đặc biệt cho trận đấu
     Route::put('tournament-matches/{id}/update-score', [TournamentMatchController::class, 'updateScore']);
+    // Kéo thả gán đội vào slot home/away (FE drag & drop)
+    Route::patch('tournament-matches/{id}/assign-team', [TournamentMatchController::class, 'assignTeam']);
+
+    // ==========================================
+    // Tournament Round (Vòng đấu) - quản lý thủ công
+    // ==========================================
+    Route::apiResource('tournament-rounds', TournamentRoundController::class);
+
+    // ==========================================
+    // Tournament Group (Bảng đấu) - quản lý thủ công
+    // ==========================================
+    Route::apiResource('tournament-groups', TournamentGroupController::class)->except(['update']);
 });
-                         

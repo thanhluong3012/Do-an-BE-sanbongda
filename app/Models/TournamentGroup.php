@@ -11,7 +11,6 @@ class TournamentGroup extends Model
     protected $fillable = [
         'tournament_id',
         'group_name',
-        'group_order',
     ];
 
     // Relationships

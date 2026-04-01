@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\TournamentMatch;
+use App\Models\TournamentRegistration;
 use App\Models\TournamentGroupStanding;
 use App\Helpers\ApiResponse;
 use Illuminate\Http\Request;
@@ -88,10 +89,10 @@ class TournamentMatchController extends Controller
         try {
             $match = TournamentMatch::with(['tournament', 'group'])->findOrFail($id);
 
-            // Check permission
+            // Chỉ organizer của giải mới được nhập tỷ số
             $user = Auth::user();
-            if ($user->role->name !== 'admin' && $match->tournament->user_id !== $user->id) {
-                return ApiResponse::error('Không có quyền cập nhật tỷ số', 403);
+            if ($match->tournament->organizer_id !== $user->id) {
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền cập nhật tỷ số', 403);
             }
 
             $validated = $request->validate([
@@ -272,6 +273,59 @@ class TournamentMatchController extends Controller
             $match->delete();
 
             return ApiResponse::success('Xóa trận đấu thành công', null);
+        } catch (\Exception $e) {
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), 500);
+        }
+    }
+
+    /**
+     * Gán đội vào slot home/away của trận đấu (dùng khi kéo thả thủ công trên FE)
+     * PATCH /tournament-matches/{id}/assign-team
+     * Body: { "slot": "home|away", "team_id": 5 }
+     */
+    public function assignTeam(Request $request, string $id)
+    {
+        try {
+            $match = TournamentMatch::with('tournament')->findOrFail($id);
+
+            // Không cho gán nếu trận đã đá
+            if (in_array($match->status, ['completed', 'ongoing'])) {
+                return ApiResponse::error('Không thể thay đổi đội trong trận đang diễn ra hoặc đã kết thúc', 400);
+            }
+
+            $user = Auth::user();
+            if ($match->tournament->organizer_id !== $user->id) {
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền gán đội', 403);
+            }
+
+            $validated = $request->validate([
+                'slot'    => 'required|in:home,away',
+                'team_id' => 'nullable|exists:teams,id',
+            ]);
+
+            // Nếu có team_id thì kiểm tra đội đã được duyệt tham gia giải chưa
+            if (!is_null($validated['team_id'])) {
+                $isApproved = TournamentRegistration::where('tournament_id', $match->tournament_id)
+                    ->where('team_id', $validated['team_id'])
+                    ->where('registration_status', 'approved')
+                    ->exists();
+
+                if (!$isApproved) {
+                    return ApiResponse::error('Đội bóng này chưa được duyệt tham gia giải đấu', 400);
+                }
+            }
+
+            if ($validated['slot'] === 'home') {
+                $match->home_team_id = $validated['team_id'];
+            } else {
+                $match->away_team_id = $validated['team_id'];
+            }
+            $match->save();
+
+            return ApiResponse::success(
+                'Gán đội vào trận thành công',
+                $match->fresh()->load(['homeTeam', 'awayTeam', 'field', 'round'])
+            );
         } catch (\Exception $e) {
             return ApiResponse::error('Lỗi: ' . $e->getMessage(), 500);
         }

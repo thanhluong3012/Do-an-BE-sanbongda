@@ -12,6 +12,7 @@ class Tournament extends Model
         'name',
         'description',
         'format',
+        'field_type',
         'max_teams',
         'min_teams',
         'registration_start',
@@ -72,5 +73,30 @@ class Tournament extends Model
     public function fieldBookings(): HasMany
     {
         return $this->hasMany(Book::class, 'tournament_id');
+    }
+
+    /**
+     * Đếm số đội đã được approve
+     */
+    public function approvedTeamsCount(): int
+    {
+        return $this->registrations()->where('registration_status', 'approved')->count();
+    }
+
+    /**
+     * Kiểm tra giải đã đủ đội chưa
+     */
+    public function isFull(): bool
+    {
+        return $this->approvedTeamsCount() >= $this->max_teams;
+    }
+
+    /**
+     * Số chỗ còn trống
+     */
+    public function availableSlots(): int
+    {
+        $slots = $this->max_teams - $this->approvedTeamsCount();
+        return max(0, $slots);
     }
 }

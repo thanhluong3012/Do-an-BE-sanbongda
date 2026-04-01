@@ -8,6 +8,7 @@ class Field extends Model
 {
     protected $fillable = [
         'field_cluster_id',
+        'name',
         'field_type',
         'status',
     ];
