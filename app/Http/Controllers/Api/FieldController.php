@@ -77,8 +77,20 @@ class FieldController extends Controller
             }
 
             if ($currentUser->role->name_role === 'owner') {
-                if (!$currentUser->ownerProfile || $cluster->owner_id !== $currentUser->ownerProfile->id) {
-                    return ApiResponse::error('Bạn không có quyền thêm sân con vào cụm sân này', null, 403);
+                if (!$currentUser->ownerProfile) {
+                    return ApiResponse::error('Tài khoản owner chưa có owner profile', null, 403);
+                }
+
+                if ($cluster->owner_id !== $currentUser->ownerProfile->id) {
+                    return ApiResponse::error(
+                        'Bạn không có quyền thêm sân con vào cụm sân này. Cụm sân này thuộc về owner khác.',
+                        [
+                            'field_cluster_id' => $cluster->id,
+                            'cluster_owner_id' => $cluster->owner_id,
+                            'your_owner_profile_id' => $currentUser->ownerProfile->id
+                        ],
+                        403
+                    );
                 }
             }
 
@@ -109,8 +121,20 @@ class FieldController extends Controller
             $currentUser = auth('api')->user();
 
             if ($currentUser->role->name_role === 'owner') {
-                if (!$currentUser->ownerProfile || $field->fieldCluster->owner_id !== $currentUser->ownerProfile->id) {
-                    return ApiResponse::error('Bạn không có quyền xem sân con này', null, 403);
+                if (!$currentUser->ownerProfile) {
+                    return ApiResponse::error('Tài khoản owner chưa có owner profile', null, 403);
+                }
+
+                if ($field->fieldCluster->owner_id !== $currentUser->ownerProfile->id) {
+                    return ApiResponse::error(
+                        'Bạn không có quyền xem sân con này. Sân này thuộc cụm sân của owner khác.',
+                        [
+                            'field_id' => $field->id,
+                            'cluster_owner_id' => $field->fieldCluster->owner_id,
+                            'your_owner_profile_id' => $currentUser->ownerProfile->id
+                        ],
+                        403
+                    );
                 }
             }
 
@@ -141,8 +165,25 @@ class FieldController extends Controller
             $currentCluster = FieldCluster::find($field->field_cluster_id);
 
             if ($currentUser->role->name_role === 'owner') {
-                if (!$currentUser->ownerProfile || !$currentCluster || $currentCluster->owner_id !== $currentUser->ownerProfile->id) {
-                    return ApiResponse::error('Bạn không có quyền cập nhật sân con này', null, 403);
+                if (!$currentUser->ownerProfile) {
+                    return ApiResponse::error('Tài khoản owner chưa có owner profile', null, 403);
+                }
+
+                if (!$currentCluster) {
+                    return ApiResponse::error('Không tìm thấy cụm sân của field này', null, 404);
+                }
+
+                if ($currentCluster->owner_id !== $currentUser->ownerProfile->id) {
+                    return ApiResponse::error(
+                        'Bạn không có quyền cập nhật sân con này. Sân này thuộc cụm sân của owner khác.',
+                        [
+                            'field_id' => $field->id,
+                            'field_cluster_id' => $currentCluster->id,
+                            'cluster_owner_id' => $currentCluster->owner_id,
+                            'your_owner_profile_id' => $currentUser->ownerProfile->id
+                        ],
+                        403
+                    );
                 }
             }
 
@@ -196,8 +237,20 @@ class FieldController extends Controller
             $currentUser = auth('api')->user();
 
             if ($currentUser->role->name_role === 'owner') {
-                if (!$currentUser->ownerProfile || $field->fieldCluster->owner_id !== $currentUser->ownerProfile->id) {
-                    return ApiResponse::error('Bạn không có quyền xóa sân con này', null, 403);
+                if (!$currentUser->ownerProfile) {
+                    return ApiResponse::error('Tài khoản owner chưa có owner profile', null, 403);
+                }
+
+                if ($field->fieldCluster->owner_id !== $currentUser->ownerProfile->id) {
+                    return ApiResponse::error(
+                        'Bạn không có quyền xóa sân con này. Sân này thuộc cụm sân của owner khác.',
+                        [
+                            'field_id' => $field->id,
+                            'cluster_owner_id' => $field->fieldCluster->owner_id,
+                            'your_owner_profile_id' => $currentUser->ownerProfile->id
+                        ],
+                        403
+                    );
                 }
             }
 

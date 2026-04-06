@@ -15,6 +15,7 @@ class OwnerProfile extends Model
         'address',
         'image_code',
         'code_id',
+        'qr_code_image',
     ];
 
     /**
@@ -31,5 +32,13 @@ class OwnerProfile extends Model
     public function staffs()
     {
         return $this->hasMany(Staff::class, 'owner_id');
+    }
+
+    /**
+     * Quan hệ với bảng field_clusters - Một chủ sân có nhiều cụm sân
+     */
+    public function fieldClusters()
+    {
+        return $this->hasMany(FieldCluster::class, 'owner_id');
     }
 }

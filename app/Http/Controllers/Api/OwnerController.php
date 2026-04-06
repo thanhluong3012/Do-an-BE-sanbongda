@@ -143,4 +143,166 @@ class OwnerController extends Controller
             return ApiResponse::error('Xóa thất bại', $e->getMessage(), 500);
         }
     }
+
+    /**
+     * Cập nhật thông tin Owner Profile của chính mình
+     * Chỉ owner mới được cập nhật profile của chính mình
+     */
+    public function updateOwnerProfile(Request $request)
+    {
+        try {
+            $currentUser = auth('api')->user();
+
+            if (!$currentUser) {
+                return ApiResponse::error('Không xác thực được người dùng', null, 401);
+            }
+
+            // Kiểm tra user có phải owner không
+            if ($currentUser->role->name_role !== 'owner') {
+                return ApiResponse::error('Chỉ chủ sân mới có thể cập nhật thông tin này', null, 403);
+            }
+
+            // Kiểm tra owner profile
+            if (!$currentUser->ownerProfile) {
+                return ApiResponse::error('Bạn chưa có owner profile', null, 400);
+            }
+
+            // Validate
+            $validator = Validator::make($request->all(), [
+                'business_name' => ['sometimes', 'string', 'max:255'],
+                'address' => ['sometimes', 'nullable', 'string'],
+                'code_id' => ['sometimes', 'nullable', 'string', 'max:20'],
+            ]);
+
+            if ($validator->fails()) {
+                return ApiResponse::error('Validation failed', $validator->errors(), 422);
+            }
+
+            // Cập nhật thông tin
+            $ownerProfile = $currentUser->ownerProfile;
+
+            if ($request->filled('business_name')) {
+                $ownerProfile->business_name = $request->business_name;
+            }
+
+            if ($request->has('address')) {
+                $ownerProfile->address = $request->address;
+            }
+
+            if ($request->has('code_id')) {
+                $ownerProfile->code_id = $request->code_id;
+            }
+
+            $ownerProfile->save();
+
+            return ApiResponse::success(
+                'Cập nhật thông tin chủ sân thành công',
+                $ownerProfile->load('user'),
+                200
+            );
+
+        } catch (Exception $e) {
+            return ApiResponse::error('Cập nhật thất bại', $e->getMessage(), 500);
+        }
+    }
+
+    /**
+     * Upload QR Code cho owner
+     * Chỉ owner mới được upload QR code của chính mình
+     */
+    public function uploadQRCode(Request $request)
+    {
+        try {
+            $currentUser = auth('api')->user();
+
+            if (!$currentUser) {
+                return ApiResponse::error('Không xác thực được người dùng', null, 401);
+            }
+
+            // Kiểm tra user có phải owner không
+            if ($currentUser->role->name_role !== 'owner') {
+                return ApiResponse::error('Chỉ chủ sân mới có thể upload QR code', null, 403);
+            }
+
+            // Kiểm tra owner profile
+            if (!$currentUser->ownerProfile) {
+                return ApiResponse::error('Bạn chưa có owner profile', null, 400);
+            }
+
+            // Validate
+            $validator = Validator::make($request->all(), [
+                'qr_code' => ['required', 'image', 'mimes:jpeg,png,jpg', 'max:2048'],
+            ]);
+
+            if ($validator->fails()) {
+                return ApiResponse::error('Validation failed', $validator->errors(), 422);
+            }
+
+            // Xóa QR code cũ nếu có
+            if ($currentUser->ownerProfile->qr_code_image) {
+                $oldPath = public_path('storage/' . $currentUser->ownerProfile->qr_code_image);
+                if (file_exists($oldPath)) {
+                    unlink($oldPath);
+                }
+            }
+
+            // Upload QR code mới
+            $file = $request->file('qr_code');
+            $filename = 'owner_' . $currentUser->ownerProfile->id . '_qr_' . time() . '.' . $file->getClientOriginalExtension();
+            $path = $file->storeAs('owner_qr_codes', $filename, 'public');
+
+            // Update owner profile
+            $currentUser->ownerProfile->qr_code_image = $path;
+            $currentUser->ownerProfile->save();
+
+            return ApiResponse::success(
+                'Upload QR code thành công',
+                [
+                    'qr_code_url' => asset('storage/' . $path),
+                    'owner_profile' => $currentUser->ownerProfile
+                ],
+                200
+            );
+        } catch (Exception $e) {
+            return ApiResponse::error('Upload thất bại', $e->getMessage(), 500);
+        }
+    }
+
+    /**
+     * Lấy QR Code của owner
+     */
+    public function getQRCode()
+    {
+        try {
+            $currentUser = auth('api')->user();
+
+            if (!$currentUser) {
+                return ApiResponse::error('Không xác thực được người dùng', null, 401);
+            }
+
+            if ($currentUser->role->name_role !== 'owner') {
+                return ApiResponse::error('Chỉ chủ sân mới có QR code', null, 403);
+            }
+
+            if (!$currentUser->ownerProfile) {
+                return ApiResponse::error('Bạn chưa có owner profile', null, 400);
+            }
+
+            $qrCodeUrl = null;
+            if ($currentUser->ownerProfile->qr_code_image) {
+                $qrCodeUrl = asset('storage/' . $currentUser->ownerProfile->qr_code_image);
+            }
+
+            return ApiResponse::success(
+                'Thông tin QR code',
+                [
+                    'qr_code_url' => $qrCodeUrl,
+                    'has_qr_code' => !is_null($currentUser->ownerProfile->qr_code_image)
+                ],
+                200
+            );
+        } catch (Exception $e) {
+            return ApiResponse::error('Lấy thông tin thất bại', $e->getMessage(), 500);
+        }
+    }
 }

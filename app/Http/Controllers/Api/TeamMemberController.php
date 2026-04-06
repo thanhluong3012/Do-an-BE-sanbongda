@@ -46,8 +46,8 @@ class TeamMemberController extends Controller
 
             // Kiểm tra quyền: Chỉ captain hoặc admin
             $user = Auth::user();
-            if ($user->role->name !== 'admin' && $team->captain_user_id !== $user->id) {
-                return ApiResponse::error('Chỉ đội trưởng hoặc admin mới có quyền thêm thành viên', 403);
+            if ($user->role->name_role !== 'admin' && $team->captain_user_id !== $user->id) {
+                return ApiResponse::error('Chỉ đội trưởng hoặc admin mới có quyền thêm thành viên', null, 403);
             }
 
             $validated = $request->validate([
@@ -123,7 +123,7 @@ class TeamMemberController extends Controller
 
             return ApiResponse::success('Chi tiết thành viên', $member);
         } catch (\Exception $e) {
-            return ApiResponse::error('Không tìm thấy thành viên', 404);
+            return ApiResponse::error('Không tìm thấy thành viên', null, 404);
         }
     }
 
@@ -139,8 +139,8 @@ class TeamMemberController extends Controller
 
             // Kiểm tra quyền: Chỉ captain hoặc admin
             $user = Auth::user();
-            if ($user->role->name !== 'admin' && $team->captain_user_id !== $user->id) {
-                return ApiResponse::error('Chỉ đội trưởng hoặc admin mới có quyền cập nhật', 403);
+            if ($user->role->name_role !== 'admin' && $team->captain_user_id !== $user->id) {
+                return ApiResponse::error('Chỉ đội trưởng hoặc admin mới có quyền cập nhật', null, 403);
             }
 
             $validated = $request->validate([
@@ -182,8 +182,8 @@ class TeamMemberController extends Controller
 
             // Kiểm tra quyền: Chỉ captain hoặc admin
             $user = Auth::user();
-            if ($user->role->name !== 'admin' && $team->captain_user_id !== $user->id) {
-                return ApiResponse::error('Chỉ đội trưởng hoặc admin mới có quyền xóa thành viên', 403);
+            if ($user->role->name_role !== 'admin' && $team->captain_user_id !== $user->id) {
+                return ApiResponse::error('Chỉ đội trưởng hoặc admin mới có quyền xóa thành viên', null, 403);
             }
 
             $member->delete();

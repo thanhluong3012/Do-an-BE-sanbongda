@@ -78,28 +78,31 @@ class TestDataSeeder extends Seeder
             ]
         );
 
-        // Xóa các fields cũ của cụm sân này để tạo lại
-        Field::where('field_cluster_id', $fieldCluster->id)->delete();
+        // KHÔNG xóa fields cũ nữa - để tránh conflict với FieldSeeder
+        // Chỉ tạo nếu chưa có
+        $existingFields = Field::where('field_cluster_id', $fieldCluster->id)->count();
 
-        // Tạo nhiều loại sân: 2 sân 5v5, 1 sân 7v7, 1 sân 11v11
-        $fieldConfigs = [
-            ['type' => '5v5', 'count' => 2],  // 2 sân 5v5
-            ['type' => '7v7', 'count' => 1],  // 1 sân 7v7
-            ['type' => '11v11', 'count' => 1], // 1 sân 11v11
-        ];
+        if ($existingFields == 0) {
+            // Tạo nhiều loại sân: 2 sân 5v5, 1 sân 7v7, 1 sân 11v11
+            $fieldConfigs = [
+                ['type' => '5v5', 'count' => 2],  // 2 sân 5v5
+                ['type' => '7v7', 'count' => 1],  // 1 sân 7v7
+                ['type' => '11v11', 'count' => 1], // 1 sân 11v11
+            ];
 
-        $fields = [];
-        foreach ($fieldConfigs as $config) {
-            $type = $config['type'];
-            $typeNumber = explode('v', $type)[0]; // Lấy số trước chữ 'v': 5, 7, 11
+            $fields = [];
+            foreach ($fieldConfigs as $config) {
+                $type = $config['type'];
+                $typeNumber = explode('v', $type)[0]; // Lấy số trước chữ 'v': 5, 7, 11
 
-            for ($i = 1; $i <= $config['count']; $i++) {
-                $fields[] = Field::create([
-                    'field_cluster_id' => $fieldCluster->id,
-                    'name' => "Sân {$typeNumber} ({$i})",
-                    'field_type' => $type,
-                    'status' => 'available',
-                ]);
+                for ($i = 1; $i <= $config['count']; $i++) {
+                    $fields[] = Field::create([
+                        'field_cluster_id' => $fieldCluster->id,
+                        'name' => "Sân {$typeNumber} ({$i})",
+                        'field_type' => $type,
+                        'status' => 'available',
+                    ]);
+                }
             }
         }
 

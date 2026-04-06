@@ -34,7 +34,7 @@ class TournamentController extends Controller
             elseif (!$request->has('my_tournaments')) {
                 $user = Auth::user();
                 // Admin xem tất cả
-                if ($user->role->name !== 'admin') {
+                if ($user->role->name_role !== 'admin') {
                     // User thường xem: giải công khai + giải của mình
                     $query->where(function($q) use ($user) {
                         $q->where('status', '!=', 'draft')
@@ -47,7 +47,7 @@ class TournamentController extends Controller
 
             return ApiResponse::success('Danh sách giải đấu', $tournaments);
         } catch (\Exception $e) {
-            return ApiResponse::error('Lỗi: ' . $e->getMessage(), 500);
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), null, 500);
         }
     }
 
@@ -67,11 +67,17 @@ class TournamentController extends Controller
                 'start_date' => 'required|date|after:registration_end',
                 'end_date' => 'required|date|after:start_date',
                 'field_cluster_id' => 'required|exists:field_clusters,id',
+                'payment_method' => 'required|in:cash,transfer',
+                // ✅ Thêm validation cho bookings (optional)
+                'bookings' => 'nullable|array',
+                'bookings.*.field_id' => 'required_with:bookings|exists:fields,id',
+                'bookings.*.date' => 'required_with:bookings|date',
+                'bookings.*.session_type' => 'required_with:bookings|in:morning,afternoon,evening,full_day',
             ]);
 
             // Validate max_teams > min_teams
             if ($validated['max_teams'] < $validated['min_teams']) {
-                return ApiResponse::error('max_teams phải lớn hơn hoặc bằng min_teams', 400);
+                return ApiResponse::error('max_teams phải lớn hơn hoặc bằng min_teams', null, 400);
             }
 
             // Kiểm tra cụm sân có hỗ trợ loại sân yêu cầu không
@@ -80,7 +86,7 @@ class TournamentController extends Controller
                 $validated['field_type']
             );
             if (!$fieldCompatibility['compatible']) {
-                return ApiResponse::error($fieldCompatibility['message'], 400);
+                return ApiResponse::error($fieldCompatibility['message'], null, 400);
             }
 
             $userId = Auth::id();
@@ -98,15 +104,161 @@ class TournamentController extends Controller
                 );
             }
 
-            $validated['organizer_id'] = $userId;
-            $validated['status'] = 'draft';
+            // Kiểm tra phương thức thanh toán
+            $fieldCluster = \App\Models\FieldCluster::with('owner')->find($validated['field_cluster_id']);
+            if (!$fieldCluster || !$fieldCluster->owner) {
+                return ApiResponse::error('Cụm sân không có chủ sân', null, 400);
+            }
 
-            $tournament = Tournament::create($validated);
+            // Nếu chọn chuyển khoản, kiểm tra owner đã upload QR code chưa
+            if ($validated['payment_method'] === 'transfer') {
+                if (!$fieldCluster->owner->qr_code_image) {
+                    return ApiResponse::error(
+                        'Cụm sân này chưa cấu hình QR code chuyển khoản. Vui lòng chọn phương thức "Tiền mặt" hoặc chọn cụm sân khác.',
+                        null,
+                        400
+                    );
+                }
+            }
 
-            return ApiResponse::success('Tạo giải đấu thành công',
-                $tournament->load(['organizer', 'fieldCluster']), 201);
+            // ✅ Bắt đầu transaction để đảm bảo data consistency
+            DB::beginTransaction();
+            try {
+                $validated['organizer_id'] = $userId;
+                $validated['status'] = 'draft';
+                $validated['payment_status'] = $validated['payment_method'] === 'cash' ? 'pending' : 'pending';
+
+                $tournament = Tournament::create($validated);
+
+                // ✅ Nếu có bookings, tự động book sân luôn
+                $bookingsCreated = [];
+                $totalPrice = 0;
+
+                if (!empty($validated['bookings'])) {
+                    foreach ($validated['bookings'] as $booking) {
+                        $field = \App\Models\Field::findOrFail($booking['field_id']);
+
+                        // Kiểm tra field thuộc cụm sân của giải
+                        if ($field->field_cluster_id !== $tournament->field_cluster_id) {
+                            throw new \Exception("Sân '{$field->name}' (ID: {$field->id}) không thuộc cụm sân đã chọn cho giải đấu");
+                        }
+
+                        // Kiểm tra sân available
+                        if ($field->status !== 'available') {
+                            throw new \Exception("Sân '{$field->name}' (ID: {$field->id}) không khả dụng (trạng thái: {$field->status})");
+                        }
+
+                        // Lấy giá
+                        $dayOfWeek = Carbon::parse($booking['date'])->dayOfWeek;
+                        $dayType = in_array($dayOfWeek, [0, 6]) ? 'weekend' : 'weekday';
+
+                        $price = \App\Models\TournamentSessionPrice::where('field_cluster_id', $tournament->field_cluster_id)
+                            ->where('field_type', $tournament->field_type)
+                            ->where('day_type', $dayType)
+                            ->where('session_type', $booking['session_type'])
+                            ->first();
+
+                        if (!$price) {
+                            $clusterName = $field->fieldCluster->name ?? 'Cụm sân';
+                            $sessionTypeVN = match($booking['session_type']) {
+                                'morning' => 'Sáng (6h-12h)',
+                                'afternoon' => 'Chiều (12h-18h)',
+                                'evening' => 'Tối (18h-23h)',
+                                'full_day' => 'Cả ngày (6h-23h)',
+                                default => $booking['session_type']
+                            };
+                            $dayTypeVN = $dayType === 'weekday' ? 'Ngày thường' : 'Cuối tuần';
+
+                            throw new \Exception(
+                                "Cụm sân '{$clusterName}' chưa cấu hình giá theo buổi cho giải đấu. " .
+                                "Loại sân: {$tournament->field_type}, Ngày: {$dayTypeVN}, Buổi: {$sessionTypeVN}. " .
+                                "Vui lòng liên hệ chủ sân để cấu hình giá hoặc chọn cụm sân khác."
+                            );
+                        }
+
+                        // Tính giờ từ session
+                        [$startTime, $endTime] = $this->getSessionTimeRange($booking['session_type']);
+
+                        // Kiểm tra trùng lịch
+                        $conflict = \App\Models\Book::where('field_id', $booking['field_id'])
+                            ->where('day_book', $booking['date'])
+                            ->where(function ($q) use ($startTime, $endTime) {
+                                $q->whereBetween('start_time', [$startTime, $endTime])
+                                  ->orWhereBetween('end_time', [$startTime, $endTime])
+                                  ->orWhere(function ($query) use ($startTime, $endTime) {
+                                      $query->where('start_time', '<=', $startTime)
+                                            ->where('end_time', '>=', $endTime);
+                                  });
+                            })
+                            ->exists();
+
+                        if ($conflict) {
+                            throw new \Exception("Sân '{$field->name}' ngày {$booking['date']} buổi {$booking['session_type']} đã được đặt");
+                        }
+
+                        // Tạo booking
+                        $book = \App\Models\Book::create([
+                            'user_id' => $userId,
+                            'tournament_id' => $tournament->id,
+                            'booking_type' => 'tournament',
+                            'field_id' => $booking['field_id'],
+                            'day_book' => $booking['date'],
+                            'start_time' => $startTime,
+                            'end_time' => $endTime,
+                            'total_price' => $price->price_per_session,
+                        ]);
+
+                        $totalPrice += $price->price_per_session;
+                        $bookingsCreated[] = $book;
+                    }
+                }
+
+                DB::commit();
+
+                // ✅ Tạo response tùy theo có book sân hay không
+                $response = [
+                    'tournament' => $tournament->load([
+                        'organizer',
+                        'fieldCluster.fields' => function($query) {
+                            $query->orderBy('name');
+                        }
+                    ]),
+                ];
+
+                if (!empty($bookingsCreated)) {
+                    $response['bookings'] = $bookingsCreated;
+                    $response['total_bookings'] = count($bookingsCreated);
+                    $response['total_price'] = $totalPrice;
+                }
+
+                // ✅ Thêm payment info
+                $response['payment_info'] = [
+                    'method' => $tournament->payment_method,
+                    'status' => $tournament->payment_status,
+                    'total_amount' => $totalPrice,
+                ];
+
+                // Nếu chọn chuyển khoản, thêm QR code URL
+                if ($tournament->payment_method === 'transfer' && $fieldCluster->owner->qr_code_image) {
+                    $response['payment_info']['qr_code_url'] = asset('storage/' . $fieldCluster->owner->qr_code_image);
+                    $response['payment_info']['instruction'] = "Vui lòng quét mã QR để chuyển khoản ĐÚNG số tiền: " . number_format($totalPrice) . " VNĐ và ghi nội dung: BOOK-T{$tournament->id}";
+                    $response['payment_info']['transfer_note'] = "BOOK-T{$tournament->id}";
+                } elseif ($tournament->payment_method === 'cash') {
+                    $response['payment_info']['instruction'] = "Vui lòng thanh toán tiền mặt khi đến sân. Số tiền: " . number_format($totalPrice) . " VNĐ";
+                }
+
+                $message = empty($bookingsCreated)
+                    ? 'Tạo giải đấu thành công'
+                    : 'Tạo giải đấu và đặt ' . count($bookingsCreated) . ' sân thành công';
+
+                return ApiResponse::success($message, $response, 201);
+
+            } catch (\Exception $e) {
+                DB::rollBack();
+                throw $e;
+            }
         } catch (\Exception $e) {
-            return ApiResponse::error('Lỗi: ' . $e->getMessage(), 500);
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), null, 500);
         }
     }
 
@@ -125,7 +277,7 @@ class TournamentController extends Controller
 
             return ApiResponse::success('Chi tiết giải đấu', $tournament);
         } catch (\Exception $e) {
-            return ApiResponse::error('Không tìm thấy giải đấu', 404);
+            return ApiResponse::error('Không tìm thấy giải đấu', null, 404);
         }
     }
 
@@ -160,7 +312,7 @@ class TournamentController extends Controller
 
             return ApiResponse::success('Danh sách giải đấu công khai', $tournaments);
         } catch (\Exception $e) {
-            return ApiResponse::error('Lỗi: ' . $e->getMessage(), 500);
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), null, 500);
         }
     }
 
@@ -188,7 +340,7 @@ class TournamentController extends Controller
 
             return ApiResponse::success('Chi tiết giải đấu', $tournament);
         } catch (\Exception $e) {
-            return ApiResponse::error('Không tìm thấy giải đấu', 404);
+            return ApiResponse::error('Không tìm thấy giải đấu', null, 404);
         }
     }
 
@@ -200,12 +352,12 @@ class TournamentController extends Controller
 
             $user = Auth::user();
             if ($tournament->organizer_id !== $user->id) {
-                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền cập nhật', 403);
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền cập nhật', null, 403);
             }
 
             // Chỉ cho phép update khi status là draft hoặc open
             if (!in_array($tournament->status, ['draft', 'open'])) {
-                return ApiResponse::error('Không thể cập nhật giải đấu đang diễn ra hoặc đã kết thúc', 400);
+                return ApiResponse::error('Không thể cập nhật giải đấu đang diễn ra hoặc đã kết thúc', null, 400);
             }
 
             $validated = $request->validate([
@@ -228,7 +380,7 @@ class TournamentController extends Controller
             if (isset($validated['field_type']) || isset($validated['field_cluster_id'])) {
                 $fieldCompatibility = $this->checkFieldClusterCompatibility($fieldClusterId, $fieldType);
                 if (!$fieldCompatibility['compatible']) {
-                    return ApiResponse::error($fieldCompatibility['message'], 400);
+                    return ApiResponse::error($fieldCompatibility['message'], null, 400);
                 }
             }
 
@@ -236,7 +388,7 @@ class TournamentController extends Controller
 
             return ApiResponse::success('Cập nhật thành công', $tournament);
         } catch (\Exception $e) {
-            return ApiResponse::error('Lỗi: ' . $e->getMessage(), 500);
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), null, 500);
         }
     }
 
@@ -248,18 +400,18 @@ class TournamentController extends Controller
 
             $user = Auth::user();
             if ($tournament->organizer_id !== $user->id) {
-                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền xóa', 403);
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền xóa', null, 403);
             }
 
             if (!in_array($tournament->status, ['draft', 'cancelled'])) {
-                return ApiResponse::error('Chỉ xóa được giải ở trạng thái draft hoặc cancelled', 400);
+                return ApiResponse::error('Chỉ xóa được giải ở trạng thái draft hoặc cancelled', null, 400);
             }
 
             $tournament->delete();
 
             return ApiResponse::success('Xóa giải thành công', null);
         } catch (\Exception $e) {
-            return ApiResponse::error('Lỗi: ' . $e->getMessage(), 500);
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), null, 500);
         }
     }
 
@@ -335,18 +487,18 @@ class TournamentController extends Controller
 
             $user = Auth::user();
             if ($tournament->organizer_id !== $user->id) {
-                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền publish', 403);
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền publish', null, 403);
             }
 
             if ($tournament->status !== 'draft') {
-                return ApiResponse::error('Chỉ publish được giải ở trạng thái draft', 400);
+                return ApiResponse::error('Chỉ publish được giải ở trạng thái draft', null, 400);
             }
 
             $tournament->update(['status' => 'open']);
 
             return ApiResponse::success('Mở đăng ký thành công', $tournament);
         } catch (\Exception $e) {
-            return ApiResponse::error('Lỗi: ' . $e->getMessage(), 500);
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), null, 500);
         }
     }
 
@@ -372,11 +524,11 @@ class TournamentController extends Controller
 
             $user = Auth::user();
             if ($tournament->organizer_id !== $user->id) {
-                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền tạo lịch thi đấu', 403);
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền tạo lịch thi đấu', null, 403);
             }
 
             if (!in_array($tournament->status, ['open', 'in_progress'])) {
-                return ApiResponse::error('Giải đấu phải ở trạng thái open hoặc in_progress để tạo lịch', 400);
+                return ApiResponse::error('Giải đấu phải ở trạng thái open hoặc in_progress để tạo lịch', null, 400);
             }
 
             if ($tournament->rounds()->count() > 0) {
@@ -400,7 +552,7 @@ class TournamentController extends Controller
             $teams = $tournament->registrations->pluck('team')->filter()->values();
 
             if ($teams->count() < 2) {
-                return ApiResponse::error('Cần ít nhất 2 đội đã được duyệt để tạo lịch', 400);
+                return ApiResponse::error('Cần ít nhất 2 đội đã được duyệt để tạo lịch', null, 400);
             }
 
             // Lấy bookings của giải
@@ -410,14 +562,14 @@ class TournamentController extends Controller
                 ->get();
 
             if ($bookings->isEmpty()) {
-                return ApiResponse::error('Chưa book sân cho giải đấu. Vui lòng book sân trước khi tạo lịch.', 400);
+                return ApiResponse::error('Chưa book sân cho giải đấu. Vui lòng book sân trước khi tạo lịch.', null, 400);
             }
 
             // Lấy field_ids từ bookings (nếu không truyền vào)
             $fieldIds = $validated['field_ids'] ?? $bookings->pluck('field_id')->unique()->values()->toArray();
 
             if (empty($fieldIds)) {
-                return ApiResponse::error('Không có sân nào để tạo lịch', 400);
+                return ApiResponse::error('Không có sân nào để tạo lịch', null, 400);
             }
 
             // Tự động tạo time_slots từ bookings (nếu không truyền vào)
@@ -465,10 +617,30 @@ class TournamentController extends Controller
                 }
             ])->findOrFail($id);
 
+            // ========================================
+            // LOGIC KIỂM TRA QUYỀN XEM LỊCH
+            // ========================================
+            $user = Auth::user();
+
+            // Nếu lịch chưa được publish
+            if (!$tournament->schedule_published) {
+                // Bắt buộc phải đăng nhập
+                if (!$user) {
+                    return ApiResponse::error('Lịch thi đấu chưa được công bố', null, 403);
+                }
+
+                // Chỉ người tạo giải mới xem được
+                if ($tournament->organizer_id !== $user->id) {
+                    return ApiResponse::error('Lịch thi đấu chưa được công bố. Chỉ người tổ chức mới có thể xem trước.', null, 403);
+                }
+            }
+            // Nếu đã publish hoặc là người tạo giải → cho phép xem
+            // ========================================
+
             $approvedTeams = $tournament->registrations->pluck('team')->filter()->values()
                 ->map(fn ($t) => ['id' => $t->id, 'name' => $t->name]);
 
-            $tournamentInfo = $tournament->only(['id', 'name', 'format', 'status', 'start_date', 'end_date', 'field_type']);
+            $tournamentInfo = $tournament->only(['id', 'name', 'format', 'status', 'start_date', 'end_date', 'field_type', 'schedule_published']);
 
             if ($tournament->format === 'knockout') {
                 $rounds = \App\Models\TournamentRound::with([
@@ -545,9 +717,9 @@ class TournamentController extends Controller
                 ]);
             }
 
-            return ApiResponse::error('Format giải đấu không hợp lệ', 400);
+            return ApiResponse::error('Format giải đấu không hợp lệ', null, 400);
         } catch (\Exception $e) {
-            return ApiResponse::error('Lỗi: ' . $e->getMessage(), 500);
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), null, 500);
         }
     }
 
@@ -562,7 +734,7 @@ class TournamentController extends Controller
             $user = Auth::user();
 
             if ($tournament->organizer_id !== $user->id) {
-                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền xóa lịch thi đấu', 403);
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền xóa lịch thi đấu', null, 403);
             }
 
             $completedCount = \App\Models\TournamentMatch::where('tournament_id', $id)
@@ -570,7 +742,7 @@ class TournamentController extends Controller
                 ->count();
 
             if ($completedCount > 0) {
-                return ApiResponse::error('Không thể xóa lịch khi đã có ' . $completedCount . ' trận hoàn thành', 400);
+                return ApiResponse::error('Không thể xóa lịch khi đã có ' . $completedCount . ' trận hoàn thành', null, 400);
             }
 
             DB::beginTransaction();
@@ -583,7 +755,7 @@ class TournamentController extends Controller
 
                 \App\Models\TournamentRound::where('tournament_id', $id)->delete();
 
-                $tournament->update(['status' => 'open']);
+                $tournament->update(['status' => 'open', 'schedule_published' => false]);
                 DB::commit();
 
                 return ApiResponse::success('Đã xóa toàn bộ lịch thi đấu. Giải đấu trở về trạng thái open.', null);
@@ -592,7 +764,67 @@ class TournamentController extends Controller
                 throw $e;
             }
         } catch (\Exception $e) {
-            return ApiResponse::error('Lỗi: ' . $e->getMessage(), 500);
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), null, 500);
+        }
+    }
+
+    // ================================================================
+    // PUBLISH SCHEDULE — Công bố lịch thi đấu cho tất cả user
+    // POST /tournaments/{id}/publish-schedule
+    // ================================================================
+    public function publishSchedule(string $id)
+    {
+        try {
+            $tournament = Tournament::findOrFail($id);
+            $user = Auth::user();
+
+            // Chỉ người tạo giải mới được publish
+            if ($tournament->organizer_id !== $user->id) {
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền công bố lịch thi đấu', null, 403);
+            }
+
+            // Kiểm tra đã có lịch thi đấu chưa
+            $hasSchedule = \App\Models\TournamentMatch::where('tournament_id', $id)->exists();
+            if (!$hasSchedule) {
+                return ApiResponse::error('Chưa có lịch thi đấu để công bố. Vui lòng tạo lịch trước.', null, 400);
+            }
+
+            // Kiểm tra đã publish chưa
+            if ($tournament->schedule_published) {
+                return ApiResponse::error('Lịch thi đấu đã được công bố trước đó', null, 400);
+            }
+
+            $tournament->update(['schedule_published' => true]);
+
+            return ApiResponse::success('Đã công bố lịch thi đấu thành công. Tất cả user giờ có thể xem lịch.', $tournament);
+        } catch (\Exception $e) {
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), null, 500);
+        }
+    }
+
+    // ================================================================
+    // UNPUBLISH SCHEDULE — Ẩn lịch thi đấu (nếu cần sửa)
+    // POST /tournaments/{id}/unpublish-schedule
+    // ================================================================
+    public function unpublishSchedule(string $id)
+    {
+        try {
+            $tournament = Tournament::findOrFail($id);
+            $user = Auth::user();
+
+            if ($tournament->organizer_id !== $user->id) {
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền ẩn lịch thi đấu', null, 403);
+            }
+
+            if (!$tournament->schedule_published) {
+                return ApiResponse::error('Lịch thi đấu chưa được công bố', null, 400);
+            }
+
+            $tournament->update(['schedule_published' => false]);
+
+            return ApiResponse::success('Đã ẩn lịch thi đấu. Chỉ bạn mới có thể xem.', $tournament);
+        } catch (\Exception $e) {
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), null, 500);
         }
     }
 
@@ -1028,7 +1260,7 @@ class TournamentController extends Controller
             $user = Auth::user();
 
             if ($tournament->organizer_id !== $user->id) {
-                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền book sân', 403);
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền book sân', null, 403);
             }
 
             $validated = $request->validate([
@@ -1118,7 +1350,7 @@ class TournamentController extends Controller
                 throw $e;
             }
         } catch (\Exception $e) {
-            return ApiResponse::error('Lỗi: ' . $e->getMessage(), 500);
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), null, 500);
         }
     }
 
@@ -1146,7 +1378,7 @@ class TournamentController extends Controller
                 'total_price' => $totalPrice,
             ]);
         } catch (\Exception $e) {
-            return ApiResponse::error('Lỗi: ' . $e->getMessage(), 500);
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), null, 500);
         }
     }
 
@@ -1161,7 +1393,7 @@ class TournamentController extends Controller
             $user = Auth::user();
 
             if ($tournament->organizer_id !== $user->id) {
-                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền hủy booking', 403);
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền hủy booking', null, 403);
             }
 
             $booking = \App\Models\Book::where('tournament_id', $id)
@@ -1174,7 +1406,7 @@ class TournamentController extends Controller
                 ->exists();
 
             if ($hasMatches) {
-                return ApiResponse::error('Không thể hủy booking vì đã có lịch thi đấu trên sân này', 400);
+                return ApiResponse::error('Không thể hủy booking vì đã có lịch thi đấu trên sân này', null, 400);
             }
 
             $booking->delete();
@@ -1228,5 +1460,120 @@ class TournamentController extends Controller
         }
 
         return array_unique($timeSlots);
+    }
+
+    // ================================================================
+    // UPLOAD PAYMENT PROOF (BILL) - User upload ảnh bill chuyển khoản
+    // ================================================================
+    public function uploadPaymentProof(Request $request, string $id)
+    {
+        try {
+            $tournament = Tournament::findOrFail($id);
+            $currentUser = Auth::user();
+
+            // Chỉ người tạo giải mới được upload bill
+            if ($tournament->organizer_id !== $currentUser->id) {
+                return ApiResponse::error('Bạn không có quyền upload bill cho giải này', null, 403);
+            }
+
+            // Chỉ giải chọn chuyển khoản mới cần upload bill
+            if ($tournament->payment_method !== 'transfer') {
+                return ApiResponse::error('Giải này thanh toán bằng tiền mặt, không cần upload bill', null, 400);
+            }
+
+            // Validate
+            $validated = $request->validate([
+                'payment_proof' => ['required', 'image', 'mimes:jpeg,png,jpg', 'max:5120'], // max 5MB
+            ]);
+
+            // Xóa bill cũ nếu có
+            if ($tournament->payment_proof) {
+                $oldPath = public_path('storage/' . $tournament->payment_proof);
+                if (file_exists($oldPath)) {
+                    unlink($oldPath);
+                }
+            }
+
+            // Upload bill mới
+            $file = $request->file('payment_proof');
+            $filename = 'tournament_' . $tournament->id . '_bill_' . time() . '.' . $file->getClientOriginalExtension();
+            $path = $file->storeAs('payment_proofs', $filename, 'public');
+
+            // Update tournament
+            $tournament->payment_proof = $path;
+            $tournament->save();
+
+            return ApiResponse::success(
+                'Upload bill thành công. Chờ chủ sân xác nhận thanh toán.',
+                [
+                    'tournament_id' => $tournament->id,
+                    'payment_proof_url' => asset('storage/' . $path),
+                    'payment_status' => $tournament->payment_status,
+                ],
+                200
+            );
+
+        } catch (\Exception $e) {
+            return ApiResponse::error('Upload thất bại: ' . $e->getMessage(), null, 500);
+        }
+    }
+
+    // ================================================================
+    // CONFIRM PAYMENT - Owner xác nhận hoặc từ chối thanh toán
+    // ================================================================
+    public function confirmPayment(Request $request, string $id)
+    {
+        try {
+            $tournament = Tournament::with('fieldCluster.owner')->findOrFail($id);
+            $currentUser = Auth::user();
+
+            // Kiểm tra quyền: Chỉ owner của cụm sân mới được confirm
+            if (!$currentUser->ownerProfile) {
+                return ApiResponse::error('Bạn không phải là chủ sân', null, 403);
+            }
+
+            $fieldCluster = $tournament->fieldCluster;
+            if (!$fieldCluster || $fieldCluster->owner_id !== $currentUser->ownerProfile->id) {
+                return ApiResponse::error('Bạn không phải chủ sân của giải đấu này', null, 403);
+            }
+
+            // Validate
+            $validated = $request->validate([
+                'action' => ['required', 'in:approve,reject'],
+                'note' => ['nullable', 'string', 'max:500'],
+            ]);
+
+            // Nếu là transfer, kiểm tra đã upload bill chưa
+            if ($tournament->payment_method === 'transfer' && !$tournament->payment_proof && $validated['action'] === 'approve') {
+                return ApiResponse::error('User chưa upload bill chuyển khoản. Không thể xác nhận thanh toán.', null, 400);
+            }
+
+            // Update payment status
+            if ($validated['action'] === 'approve') {
+                $tournament->payment_status = 'paid';
+                $tournament->payment_date = now();
+                $message = 'Xác nhận thanh toán thành công';
+            } else {
+                $tournament->payment_status = 'failed';
+                $message = 'Đã từ chối thanh toán';
+            }
+
+            // Lưu note nếu có (có thể thêm field payment_note vào bảng tournaments)
+            $tournament->save();
+
+            return ApiResponse::success(
+                $message,
+                [
+                    'tournament_id' => $tournament->id,
+                    'payment_status' => $tournament->payment_status,
+                    'payment_date' => $tournament->payment_date,
+                    'note' => $validated['note'] ?? null,
+                ],
+                200
+            );
+
+        } catch (\Exception $e) {
+            return ApiResponse::error('Xử lý thất bại: ' . $e->getMessage(), null, 500);
+        }
     }
 }

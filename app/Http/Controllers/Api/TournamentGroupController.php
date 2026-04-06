@@ -49,7 +49,7 @@ class TournamentGroupController extends Controller
             $user = Auth::user();
 
             if ($tournament->organizer_id !== $user->id) {
-                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền tạo bảng đấu', 403);
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền tạo bảng đấu', null, 403);
             }
 
             $group = TournamentGroup::create($validated);
@@ -76,7 +76,7 @@ class TournamentGroupController extends Controller
 
             return ApiResponse::success('Chi tiết bảng đấu', $group);
         } catch (\Exception $e) {
-            return ApiResponse::error('Không tìm thấy bảng đấu', 404);
+            return ApiResponse::error('Không tìm thấy bảng đấu', null, 404);
         }
     }
 
@@ -88,7 +88,7 @@ class TournamentGroupController extends Controller
             $user = Auth::user();
 
             if ($group->tournament->organizer_id !== $user->id) {
-                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền xóa bảng đấu', 403);
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền xóa bảng đấu', null, 403);
             }
 
             $group->delete();

@@ -26,6 +26,16 @@ class User extends Authenticatable implements JWTSubject
     ];
 
     /**
+     * Get the attributes that should be cast.
+     */
+    protected function casts(): array
+    {
+        return [
+            'password' => 'hashed',
+        ];
+    }
+
+    /**
      * Quan hệ với bảng roles
      */
     public function role()

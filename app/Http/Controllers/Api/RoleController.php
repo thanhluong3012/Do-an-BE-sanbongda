@@ -36,7 +36,7 @@ class RoleController extends Controller
         try {
             // Validate
             $validator = Validator::make($request->all(), [
-                'name' => ['required', 'string', 'max:255', 'unique:roles,name'],
+                'name' => ['required', 'string', 'max:255', 'unique:roles,name_role'],
                 'description' => ['nullable', 'string', 'max:500'],
             ]);
 
@@ -46,7 +46,7 @@ class RoleController extends Controller
 
             // Create
             $role = Role::create([
-                'name' => $request->string('name'),
+                'name_role' => $request->string('name'),
                 'description' => $request->string('description'),
             ]);
 
@@ -83,7 +83,7 @@ class RoleController extends Controller
 
             // Validate (update thì cho phép "sometimes")
             $validator = Validator::make($request->all(), [
-                'name' => ['sometimes', 'string', 'max:255', 'unique:roles,name,' . $role->id],
+                'name' => ['sometimes', 'string', 'max:255', 'unique:roles,name_role,' . $role->id],
                 'description' => ['sometimes', 'nullable', 'string', 'max:500'],
             ]);
 
@@ -92,7 +92,7 @@ class RoleController extends Controller
             }
 
             // Update fields nếu có gửi lên
-            if ($request->filled('name')) $role->name = $request->string('name');
+            if ($request->filled('name')) $role->name_role = $request->string('name');
             if ($request->has('description')) $role->description = $request->string('description');
 
             $role->save();

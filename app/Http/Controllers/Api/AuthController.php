@@ -140,7 +140,9 @@ class AuthController extends Controller
     {
         try {
             // auth('api')->user() lấy user từ token
+            /** @var \App\Models\User $user */
             $user = $this->guard()->user();
+            $user->load('role');
 
             return ApiResponse::success(
                 'User retrieved successfully',
@@ -181,6 +183,63 @@ class AuthController extends Controller
         } catch (Exception $e) {
             return ApiResponse::error(
                 'Logout failed',
+                $e->getMessage(),
+                500
+            );
+        }
+    }
+
+    /**
+     * CẬP NHẬT THÔNG TIN CÁ NHÂN
+     *
+     * User có thể cập nhật name, phone, password của chính mình
+     * Không thể thay đổi email, role_id, status
+     *
+     * @param Request $request
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function updateProfile(Request $request)
+    {
+        try {
+            /** @var \App\Models\User $user */
+            $user = $this->guard()->user();
+
+            // Validate
+            $validator = \Illuminate\Support\Facades\Validator::make($request->all(), [
+                'name' => ['sometimes', 'string', 'max:255'],
+                'phone' => ['sometimes', 'nullable', 'string', 'max:20'],
+                'password' => ['sometimes', 'string', 'min:6', 'confirmed'], // required password_confirmation
+            ]);
+
+            if ($validator->fails()) {
+                return ApiResponse::error('Validation failed', $validator->errors(), 422);
+            }
+
+            // Cập nhật thông tin
+            if ($request->filled('name')) {
+                $user->name = $request->name;
+            }
+
+            if ($request->has('phone')) {
+                $user->phone = $request->phone;
+            }
+
+            if ($request->filled('password')) {
+                $user->password = Hash::make($request->password);
+            }
+
+            $user->save();
+            $user->load('role');
+
+            return ApiResponse::success(
+                'Cập nhật thông tin thành công',
+                $user,
+                200
+            );
+
+        } catch (Exception $e) {
+            return ApiResponse::error(
+                'Cập nhật thất bại',
                 $e->getMessage(),
                 500
             );

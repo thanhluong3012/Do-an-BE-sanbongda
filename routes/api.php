@@ -56,6 +56,9 @@ Route::prefix('public')->group(function () {
     // Giải đấu (chỉ xem, không đăng ký)
     Route::get('tournaments', [TournamentController::class, 'publicIndex']);
     Route::get('tournaments/{id}', [TournamentController::class, 'publicShow']);
+
+    // Xem lịch thi đấu/bracket (có logic kiểm tra quyền bên trong controller)
+    Route::get('tournaments/{id}/bracket', [TournamentController::class, 'getBracket']);
 });
 
 
@@ -73,6 +76,11 @@ Route::middleware('jwt.auth')->group(function () {
         Route::post('refresh', [AuthController::class, 'refresh']);
         Route::get('me', [AuthController::class, 'me']);
     });
+
+    // ==========================================
+    // Profile - TẤT CẢ USER ĐÃ ĐĂNG NHẬP
+    // ==========================================
+    Route::put('profile', [AuthController::class, 'updateProfile']);
 
     // ==========================================
     // User & Role Management - CHỈ ADMIN
@@ -99,6 +107,11 @@ Route::middleware('jwt.auth')->group(function () {
     Route::middleware('check.role:admin,owner')->group(function () {
         // Quản lý chủ sân
         Route::apiResource('owners', OwnerController::class);
+
+        // Owner Profile Management - Owner tự quản lý thông tin của mình
+        Route::put('owner/profile', [OwnerController::class, 'updateOwnerProfile']);
+        Route::post('owner/upload-qr', [OwnerController::class, 'uploadQRCode']);
+        Route::get('owner/qr-code', [OwnerController::class, 'getQRCode']);
 
         // Quản lý nhân viên
         Route::apiResource('staffs', StaffController::class);
@@ -177,6 +190,15 @@ Route::middleware('jwt.auth')->group(function () {
     Route::delete('tournaments/{id}/field-bookings/{booking_id}', [TournamentController::class, 'deleteFieldBooking']);
     Route::delete('tournaments/{tournament}', [TournamentController::class, 'destroy']);
 
+    // ==========================================
+    // Payment Management - Thanh toán giải đấu
+    // ==========================================
+    // User upload bill chuyển khoản
+    Route::post('tournaments/{id}/upload-payment-proof', [TournamentController::class, 'uploadPaymentProof']);
+
+    // Owner xác nhận thanh toán (approve/reject)
+    Route::put('tournaments/{id}/confirm-payment', [TournamentController::class, 'confirmPayment']);
+
     // Routes đặc biệt cho giải đấu
     Route::post('tournaments/{id}/publish', [TournamentController::class, 'publish']);
 
@@ -185,8 +207,12 @@ Route::middleware('jwt.auth')->group(function () {
     // ==========================================
     // Tự động sinh lịch (1 nút bấm)
     Route::post('tournaments/{id}/generate-schedule', [TournamentController::class, 'generateSchedule']);
-    // Lấy bracket/lịch để FE render sơ đồ
+    // Lấy bracket/lịch để FE render sơ đồ (authenticated users)
     Route::get('tournaments/{id}/bracket', [TournamentController::class, 'getBracket']);
+    // Công bố lịch thi đấu ra public
+    Route::post('tournaments/{id}/publish-schedule', [TournamentController::class, 'publishSchedule']);
+    // Ẩn lịch thi đấu (chỉ người tạo giải xem)
+    Route::post('tournaments/{id}/unpublish-schedule', [TournamentController::class, 'unpublishSchedule']);
     // Xóa toàn bộ lịch để tạo lại
     Route::delete('tournaments/{id}/schedule', [TournamentController::class, 'resetSchedule']);
 

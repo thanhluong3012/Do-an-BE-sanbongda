@@ -47,7 +47,7 @@ class TournamentRoundController extends Controller
             $user = Auth::user();
 
             if ($tournament->organizer_id !== $user->id) {
-                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền tạo vòng đấu', 403);
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền tạo vòng đấu', null, 403);
             }
 
             $round = TournamentRound::create($validated);
@@ -71,7 +71,7 @@ class TournamentRoundController extends Controller
 
             return ApiResponse::success('Chi tiết vòng đấu', $round);
         } catch (\Exception $e) {
-            return ApiResponse::error('Không tìm thấy vòng đấu', 404);
+            return ApiResponse::error('Không tìm thấy vòng đấu', null, 404);
         }
     }
 
@@ -83,7 +83,7 @@ class TournamentRoundController extends Controller
             $user = Auth::user();
 
             if ($round->tournament->organizer_id !== $user->id) {
-                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền cập nhật vòng đấu', 403);
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền cập nhật vòng đấu', null, 403);
             }
 
             $validated = $request->validate([
@@ -111,11 +111,11 @@ class TournamentRoundController extends Controller
             $user = Auth::user();
 
             if ($round->tournament->organizer_id !== $user->id) {
-                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền xóa vòng đấu', 403);
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền xóa vòng đấu', null, 403);
             }
 
             if ($round->matches->where('status', 'completed')->count() > 0) {
-                return ApiResponse::error('Không thể xóa vòng đấu đã có trận hoàn thành', 400);
+                return ApiResponse::error('Không thể xóa vòng đấu đã có trận hoàn thành', null, 400);
             }
 
             $round->delete();

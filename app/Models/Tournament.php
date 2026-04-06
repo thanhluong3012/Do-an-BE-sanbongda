@@ -20,8 +20,13 @@ class Tournament extends Model
         'start_date',
         'end_date',
         'status',
+        'schedule_published',
         'field_cluster_id',
         'organizer_id',
+        'payment_method',
+        'payment_status',
+        'payment_date',
+        'payment_proof',
     ];
 
     protected $casts = [
@@ -29,6 +34,7 @@ class Tournament extends Model
         'registration_end' => 'datetime',
         'start_date' => 'date',
         'end_date' => 'date',
+        'schedule_published' => 'boolean',
     ];
 
     // Relationships

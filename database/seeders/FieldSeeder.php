@@ -17,31 +17,65 @@ class FieldSeeder extends Seeder
             return;
         }
 
+        $this->command->info("Tạo fields cho {$clusters->count()} clusters...");
+
+        $totalFields = 0;
         foreach ($clusters as $cluster) {
-            Field::updateOrCreate(
+            // Tạo 2 sân 5v5
+            $field1 = Field::updateOrCreate(
                 [
                     'field_cluster_id' => $cluster->id,
+                    'name' => 'Sân 5v5 (1)',
+                ],
+                [
                     'field_type' => '5v5',
-                ],
-                ['status' => 'available']
+                    'status' => 'available'
+                ]
             );
+            $totalFields++;
 
-            Field::updateOrCreate(
+            $field2 = Field::updateOrCreate(
                 [
                     'field_cluster_id' => $cluster->id,
+                    'name' => 'Sân 5v5 (2)',
+                ],
+                [
+                    'field_type' => '5v5',
+                    'status' => 'available'
+                ]
+            );
+            $totalFields++;
+
+            // Tạo 1 sân 7v7
+            $field3 = Field::updateOrCreate(
+                [
+                    'field_cluster_id' => $cluster->id,
+                    'name' => 'Sân 7v7 (1)',
+                ],
+                [
                     'field_type' => '7v7',
-                ],
-                ['status' => 'available']
+                    'status' => 'available'
+                ]
             );
+            $totalFields++;
 
-            Field::updateOrCreate(
+            // Tạo 1 sân 11v11
+            $field4 = Field::updateOrCreate(
                 [
                     'field_cluster_id' => $cluster->id,
-                    'field_type' => '11v11',
+                    'name' => 'Sân 11v11 (1)',
                 ],
-                ['status' => 'maintenance']
+                [
+                    'field_type' => '11v11',
+                    'status' => 'maintenance'
+                ]
             );
+            $totalFields++;
+
+            $this->command->info("  ✓ Cluster '{$cluster->name}': 4 sân");
         }
-        $this->command->info('Tạo dữ liệu mẫu fields thành công!');
+
+        $this->command->info("✅ Tạo tổng {$totalFields} fields thành công!");
+        $this->command->info('Mỗi cluster có 4 sân: 2 sân 5v5, 1 sân 7v7, 1 sân 11v11');
     }
 }

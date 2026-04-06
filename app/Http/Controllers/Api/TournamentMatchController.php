@@ -79,7 +79,7 @@ class TournamentMatchController extends Controller
 
             return ApiResponse::success('Chi tiết trận đấu', $match);
         } catch (\Exception $e) {
-            return ApiResponse::error('Không tìm thấy trận đấu', 404);
+            return ApiResponse::error('Không tìm thấy trận đấu', null, 404);
         }
     }
 
@@ -92,7 +92,7 @@ class TournamentMatchController extends Controller
             // Chỉ organizer của giải mới được nhập tỷ số
             $user = Auth::user();
             if ($match->tournament->organizer_id !== $user->id) {
-                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền cập nhật tỷ số', 403);
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền cập nhật tỷ số', null, 403);
             }
 
             $validated = $request->validate([
@@ -267,7 +267,7 @@ class TournamentMatchController extends Controller
 
             // Chỉ xóa được trận chưa completed
             if ($match->status === 'completed') {
-                return ApiResponse::error('Không thể xóa trận đã hoàn thành', 400);
+                return ApiResponse::error('Không thể xóa trận đã hoàn thành', null, 400);
             }
 
             $match->delete();
@@ -290,12 +290,12 @@ class TournamentMatchController extends Controller
 
             // Không cho gán nếu trận đã đá
             if (in_array($match->status, ['completed', 'ongoing'])) {
-                return ApiResponse::error('Không thể thay đổi đội trong trận đang diễn ra hoặc đã kết thúc', 400);
+                return ApiResponse::error('Không thể thay đổi đội trong trận đang diễn ra hoặc đã kết thúc', null, 400);
             }
 
             $user = Auth::user();
             if ($match->tournament->organizer_id !== $user->id) {
-                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền gán đội', 403);
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền gán đội', null, 403);
             }
 
             $validated = $request->validate([
@@ -311,7 +311,7 @@ class TournamentMatchController extends Controller
                     ->exists();
 
                 if (!$isApproved) {
-                    return ApiResponse::error('Đội bóng này chưa được duyệt tham gia giải đấu', 400);
+                    return ApiResponse::error('Đội bóng này chưa được duyệt tham gia giải đấu', null, 400);
                 }
             }
 
