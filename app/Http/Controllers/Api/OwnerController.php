@@ -172,6 +172,14 @@ class OwnerController extends Controller
                 'business_name' => ['sometimes', 'string', 'max:255'],
                 'address' => ['sometimes', 'nullable', 'string'],
                 'code_id' => ['sometimes', 'nullable', 'string', 'max:20'],
+                'qr_code_image' => [
+                    'sometimes',
+                    'nullable',
+                    'string',
+                    'url',
+                    'max:1000',
+                    'regex:/^https?:\/\//'  // Chỉ chấp nhận full URL
+                ],
             ]);
 
             if ($validator->fails()) {
@@ -193,6 +201,21 @@ class OwnerController extends Controller
                 $ownerProfile->code_id = $request->code_id;
             }
 
+            // Xử lý QR code image (chỉ chấp nhận full URL)
+            if ($request->has('qr_code_image')) {
+                if ($request->qr_code_image === null) {
+                    // Cho phép xóa QR code
+                    $ownerProfile->qr_code_image = null;
+                } else {
+                    // Validate là full URL
+                    if (!filter_var($request->qr_code_image, FILTER_VALIDATE_URL) ||
+                        !preg_match('/^https?:\/\//i', $request->qr_code_image)) {
+                        return ApiResponse::error('QR code URL phải là đường dẫn đầy đủ (http:// hoặc https://)', null, 422);
+                    }
+                    $ownerProfile->qr_code_image = $request->qr_code_image;
+                }
+            }
+
             $ownerProfile->save();
 
             return ApiResponse::success(
@@ -209,6 +232,10 @@ class OwnerController extends Controller
     /**
      * Upload QR Code cho owner
      * Chỉ owner mới được upload QR code của chính mình
+     */
+    /**
+     * Upload QR Code URL (Frontend upload to Supabase, then send URL here)
+     * Frontend upload ảnh lên Supabase, trả về URL, backend chỉ lưu URL vào database
      */
     public function uploadQRCode(Request $request)
     {
@@ -229,42 +256,41 @@ class OwnerController extends Controller
                 return ApiResponse::error('Bạn chưa có owner profile', null, 400);
             }
 
-            // Validate
+            // Validate - CHỈ chấp nhận full URL (không chấp nhận relative path)
             $validator = Validator::make($request->all(), [
-                'qr_code' => ['required', 'image', 'mimes:jpeg,png,jpg', 'max:2048'],
+                'qr_code_url' => [
+                    'required',
+                    'string',
+                    'url',
+                    'max:1000',
+                    'regex:/^https?:\/\//'  // Bắt buộc phải bắt đầu bằng http:// hoặc https://
+                ],
             ]);
 
             if ($validator->fails()) {
                 return ApiResponse::error('Validation failed', $validator->errors(), 422);
             }
 
-            // Xóa QR code cũ nếu có
-            if ($currentUser->ownerProfile->qr_code_image) {
-                $oldPath = public_path('storage/' . $currentUser->ownerProfile->qr_code_image);
-                if (file_exists($oldPath)) {
-                    unlink($oldPath);
-                }
+            // Đảm bảo không phải relative path
+            $qrUrl = $request->qr_code_url;
+            if (!filter_var($qrUrl, FILTER_VALIDATE_URL) || !preg_match('/^https?:\/\//i', $qrUrl)) {
+                return ApiResponse::error('QR code URL phải là đường dẫn đầy đủ (http:// hoặc https://)', null, 422);
             }
 
-            // Upload QR code mới
-            $file = $request->file('qr_code');
-            $filename = 'owner_' . $currentUser->ownerProfile->id . '_qr_' . time() . '.' . $file->getClientOriginalExtension();
-            $path = $file->storeAs('owner_qr_codes', $filename, 'public');
-
-            // Update owner profile
-            $currentUser->ownerProfile->qr_code_image = $path;
+            // Lưu URL vào database
+            $currentUser->ownerProfile->qr_code_image = $qrUrl;
             $currentUser->ownerProfile->save();
 
             return ApiResponse::success(
-                'Upload QR code thành công',
+                'Lưu QR code thành công',
                 [
-                    'qr_code_url' => asset('storage/' . $path),
+                    'qr_code_url' => $currentUser->ownerProfile->qr_code_image,
                     'owner_profile' => $currentUser->ownerProfile
                 ],
                 200
             );
         } catch (Exception $e) {
-            return ApiResponse::error('Upload thất bại', $e->getMessage(), 500);
+            return ApiResponse::error('Lưu QR code thất bại', $e->getMessage(), 500);
         }
     }
 
@@ -288,16 +314,14 @@ class OwnerController extends Controller
                 return ApiResponse::error('Bạn chưa có owner profile', null, 400);
             }
 
-            $qrCodeUrl = null;
-            if ($currentUser->ownerProfile->qr_code_image) {
-                $qrCodeUrl = asset('storage/' . $currentUser->ownerProfile->qr_code_image);
-            }
+            // Trả về URL trực tiếp từ database
+            $qrCodeUrl = $currentUser->ownerProfile->qr_code_image;
 
             return ApiResponse::success(
                 'Thông tin QR code',
                 [
                     'qr_code_url' => $qrCodeUrl,
-                    'has_qr_code' => !is_null($currentUser->ownerProfile->qr_code_image)
+                    'has_qr_code' => !is_null($qrCodeUrl)
                 ],
                 200
             );

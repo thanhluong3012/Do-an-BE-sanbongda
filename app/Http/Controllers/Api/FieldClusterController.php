@@ -235,7 +235,7 @@ class FieldClusterController extends Controller
     public function publicIndex()
     {
         try {
-            $clusters = FieldCluster::with(['fields', 'hourlyPrices'])
+            $clusters = FieldCluster::with(['owner', 'fields', 'hourlyPrices'])
                 ->get();
 
             return ApiResponse::success('Danh sách cụm sân', $clusters, 200);
@@ -250,7 +250,7 @@ class FieldClusterController extends Controller
     public function publicShow(string $id)
     {
         try {
-            $cluster = FieldCluster::with(['fields', 'hourlyPrices'])->find($id);
+            $cluster = FieldCluster::with(['owner', 'fields', 'hourlyPrices'])->find($id);
 
             if (!$cluster) {
                 return ApiResponse::error('Không tìm thấy cụm sân', null, 404);

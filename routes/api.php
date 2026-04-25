@@ -21,6 +21,7 @@ use App\Http\Controllers\Api\TournamentMatchController;
 use App\Http\Controllers\Api\TournamentRoundController;
 use App\Http\Controllers\Api\TournamentGroupController;
 use App\Http\Controllers\Api\TournamentSessionPriceController;
+use App\Http\Controllers\Api\NotificationController;
 
 
 // ==========================================
@@ -81,6 +82,18 @@ Route::middleware('jwt.auth')->group(function () {
     // Profile - TẤT CẢ USER ĐÃ ĐĂNG NHẬP
     // ==========================================
     Route::put('profile', [AuthController::class, 'updateProfile']);
+
+    // ==========================================
+    // Notifications - TẤT CẢ USER ĐÃ ĐĂNG NHẬP
+    // ==========================================
+    Route::prefix('notifications')->group(function () {
+        Route::get('/', [NotificationController::class, 'index']); // Danh sách thông báo
+        Route::get('/unread-count', [NotificationController::class, 'unreadCount']); // Đếm chưa đọc
+        Route::put('/{id}/read', [NotificationController::class, 'markAsRead']); // Đánh dấu 1 cái đã đọc
+        Route::put('/mark-all-read', [NotificationController::class, 'markAllAsRead']); // Đánh dấu tất cả đã đọc
+        Route::delete('/{id}', [NotificationController::class, 'destroy']); // Xóa 1 thông báo
+        Route::delete('/read/all', [NotificationController::class, 'deleteAllRead']); // Xóa tất cả đã đọc
+    });
 
     // ==========================================
     // User & Role Management - CHỈ ADMIN
@@ -198,6 +211,18 @@ Route::middleware('jwt.auth')->group(function () {
 
     // Owner xác nhận thanh toán (approve/reject)
     Route::put('tournaments/{id}/confirm-payment', [TournamentController::class, 'confirmPayment']);
+
+    // ==========================================
+    // Tournament Rules File - File thể lệ giải đấu
+    // ==========================================
+    // Upload file thể lệ (.pdf, .doc, .docx)
+    Route::post('tournaments/{id}/upload-rules-file', [TournamentController::class, 'uploadRulesFile']);
+
+    // Download file thể lệ (public - không cần đăng nhập)
+    Route::get('tournaments/{id}/download-rules-file', [TournamentController::class, 'downloadRulesFile'])->withoutMiddleware('auth:api');
+
+    // Xóa file thể lệ
+    Route::delete('tournaments/{id}/delete-rules-file', [TournamentController::class, 'deleteRulesFile']);
 
     // Routes đặc biệt cho giải đấu
     Route::post('tournaments/{id}/publish', [TournamentController::class, 'publish']);

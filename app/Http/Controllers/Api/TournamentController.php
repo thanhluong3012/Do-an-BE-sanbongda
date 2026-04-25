@@ -8,6 +8,7 @@ use App\Helpers\ApiResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
 
 class TournamentController extends Controller
@@ -238,13 +239,47 @@ class TournamentController extends Controller
                     'total_amount' => $totalPrice,
                 ];
 
-                // Nếu chọn chuyển khoản, thêm QR code URL
+                // Nếu chọn chuyển khoản, thêm QR code URL (trả về trực tiếp từ database - đã là URL từ Supabase)
                 if ($tournament->payment_method === 'transfer' && $fieldCluster->owner->qr_code_image) {
-                    $response['payment_info']['qr_code_url'] = asset('storage/' . $fieldCluster->owner->qr_code_image);
+                    $response['payment_info']['qr_code_url'] = $fieldCluster->owner->qr_code_image;
                     $response['payment_info']['instruction'] = "Vui lòng quét mã QR để chuyển khoản ĐÚNG số tiền: " . number_format($totalPrice) . " VNĐ và ghi nội dung: BOOK-T{$tournament->id}";
                     $response['payment_info']['transfer_note'] = "BOOK-T{$tournament->id}";
                 } elseif ($tournament->payment_method === 'cash') {
-                    $response['payment_info']['instruction'] = "Vui lòng thanh toán tiền mặt khi đến sân. Số tiền: " . number_format($totalPrice) . " VNĐ";
+                    // ✅ Thêm thông tin liên hệ owner cho tiền mặt
+                    $response['payment_info']['instruction'] = "Vui lòng liên hệ chủ sân để thanh toán tiền mặt. Số tiền: " . number_format($totalPrice) . " VNĐ";
+                    $response['payment_info']['owner_contact'] = [
+                        'business_name' => $fieldCluster->owner->business_name,
+                        'owner_name' => $fieldCluster->owner->user->name ?? 'N/A',
+                        'phone' => $fieldCluster->phone ?? $fieldCluster->owner->user->phone ?? 'Chưa cập nhật',
+                        'address' => $fieldCluster->address ?? 'Chưa cập nhật',
+                        'cluster_name' => $fieldCluster->name,
+                    ];
+                    $response['payment_info']['next_step'] = 'Vui lòng liên hệ số điện thoại trên để hẹn lịch đến sân thanh toán';
+                }
+
+                // ✅ Tạo thông báo cho owner về giải đấu mới
+                try {
+                    $ownerUserId = $fieldCluster->owner->user_id;
+                    $paymentMethodText = $tournament->payment_method === 'cash' ? 'tiền mặt tại sân' : 'chuyển khoản';
+
+                    \App\Models\Notification::create([
+                        'user_id' => $ownerUserId,
+                        'type' => 'new_tournament_created',
+                        'title' => '🏆 Có giải đấu mới tại cụm sân của bạn',
+                        'message' => "Giải đấu \"{$tournament->name}\" vừa được tạo tại {$fieldCluster->name}. Phương thức thanh toán: {$paymentMethodText}. Tổng tiền: " . number_format($totalPrice) . " VNĐ.",
+                        'data' => [
+                            'tournament_id' => $tournament->id,
+                            'tournament_name' => $tournament->name,
+                            'field_cluster_id' => $fieldCluster->id,
+                            'cluster_name' => $fieldCluster->name,
+                            'payment_method' => $tournament->payment_method,
+                            'total_amount' => $totalPrice,
+                            'organizer_name' => Auth::user()->name,
+                            'organizer_phone' => Auth::user()->phone,
+                        ],
+                    ]);
+                } catch (\Exception $notifError) {
+                    Log::warning('Failed to create tournament notification for owner: ' . $notifError->getMessage());
                 }
 
                 $message = empty($bookingsCreated)
@@ -266,6 +301,7 @@ class TournamentController extends Controller
     public function show(string $id)
     {
         try {
+            $user = Auth::user();
             $tournament = Tournament::with([
                 'organizer',
                 'fieldCluster',
@@ -275,9 +311,35 @@ class TournamentController extends Controller
                 'rounds.matches'
             ])->findOrFail($id);
 
-            return ApiResponse::success('Chi tiết giải đấu', $tournament);
+            // Kiểm tra quyền xem
+            // Admin: xem tất cả
+            // Organizer: xem giải của mình (kể cả draft)
+            // User khác: chỉ xem giải public (status != draft)
+            $userRole = $user->role ? $user->role->name_role : null;
+            if ($userRole !== 'admin') {
+                if ($tournament->organizer_id !== $user->id && $tournament->status === 'draft') {
+                    return ApiResponse::error('Bạn không có quyền xem giải đấu này', null, 403);
+                }
+            }
+
+            // Thêm thông tin file thể lệ nếu có
+            $tournamentData = $tournament->toArray();
+            if ($tournament->tournament_rules_file) {
+                $tournamentData['rules_file_info'] = [
+                    'file_url' => asset('storage/' . $tournament->tournament_rules_file),
+                    'file_name' => basename($tournament->tournament_rules_file),
+                    'download_url' => url("/api/tournaments/{$tournament->id}/download-rules-file"),
+                    'has_file' => true,
+                ];
+            } else {
+                $tournamentData['rules_file_info'] = [
+                    'has_file' => false,
+                ];
+            }
+
+            return ApiResponse::success('Chi tiết giải đấu', $tournamentData);
         } catch (\Exception $e) {
-            return ApiResponse::error('Không tìm thấy giải đấu', null, 404);
+            return ApiResponse::error('Không tìm thấy giải đấu: ' . $e->getMessage(), null, 404);
         }
     }
 
@@ -338,7 +400,22 @@ class TournamentController extends Controller
             $tournament->is_full = $tournament->isFull();
             $tournament->available_slots = $tournament->availableSlots();
 
-            return ApiResponse::success('Chi tiết giải đấu', $tournament);
+            // Thêm thông tin file thể lệ nếu có
+            $tournamentData = $tournament->toArray();
+            if ($tournament->tournament_rules_file) {
+                $tournamentData['rules_file_info'] = [
+                    'file_url' => asset('storage/' . $tournament->tournament_rules_file),
+                    'file_name' => basename($tournament->tournament_rules_file),
+                    'download_url' => url("/api/tournaments/{$tournament->id}/download-rules-file"),
+                    'has_file' => true,
+                ];
+            } else {
+                $tournamentData['rules_file_info'] = [
+                    'has_file' => false,
+                ];
+            }
+
+            return ApiResponse::success('Chi tiết giải đấu', $tournamentData);
         } catch (\Exception $e) {
             return ApiResponse::error('Không tìm thấy giải đấu', null, 404);
         }
@@ -492,6 +569,20 @@ class TournamentController extends Controller
 
             if ($tournament->status !== 'draft') {
                 return ApiResponse::error('Chỉ publish được giải ở trạng thái draft', null, 400);
+            }
+
+            // ✅ Kiểm tra đã thanh toán chưa
+            if ($tournament->payment_status !== 'paid') {
+                $paymentMethodText = $tournament->payment_method === 'cash' ? 'tiền mặt tại sân' : 'chuyển khoản và upload bill';
+                return ApiResponse::error(
+                    'Bạn cần hoàn thành thanh toán trước khi mở đăng ký giải đấu. ' .
+                    'Vui lòng thanh toán bằng ' . $paymentMethodText . ' và chờ chủ sân xác nhận.',
+                    [
+                        'payment_status' => $tournament->payment_status,
+                        'payment_method' => $tournament->payment_method,
+                    ],
+                    400
+                );
             }
 
             $tournament->update(['status' => 'open']);
@@ -1553,9 +1644,47 @@ class TournamentController extends Controller
                 $tournament->payment_status = 'paid';
                 $tournament->payment_date = now();
                 $message = 'Xác nhận thanh toán thành công';
+
+                // ✅ Tạo thông báo cho người tổ chức giải
+                try {
+                    \App\Models\Notification::create([
+                        'user_id' => $tournament->organizer_id,
+                        'type' => 'tournament_payment_approved',
+                        'title' => '✅ Thanh toán giải đấu đã được xác nhận',
+                        'message' => "Thanh toán cho giải đấu \"{$tournament->name}\" đã được chủ sân xác nhận. Bạn có thể mở đăng ký giải ngay bây giờ.",
+                        'data' => [
+                            'tournament_id' => $tournament->id,
+                            'tournament_name' => $tournament->name,
+                            'payment_method' => $tournament->payment_method,
+                            'payment_status' => 'paid',
+                            'payment_date' => $tournament->payment_date,
+                            'total_amount' => $tournament->fieldBookings()->sum('total_price') ?? 0,
+                        ],
+                    ]);
+                } catch (\Exception $notifError) {
+                    Log::warning('Failed to create payment notification: ' . $notifError->getMessage());
+                }
             } else {
                 $tournament->payment_status = 'failed';
                 $message = 'Đã từ chối thanh toán';
+
+                // ✅ Tạo thông báo từ chối
+                try {
+                    \App\Models\Notification::create([
+                        'user_id' => $tournament->organizer_id,
+                        'type' => 'tournament_payment_rejected',
+                        'title' => '❌ Thanh toán giải đấu bị từ chối',
+                        'message' => "Thanh toán cho giải đấu \"{$tournament->name}\" đã bị từ chối. Lý do: " . ($validated['note'] ?? 'Không có lý do cụ thể'),
+                        'data' => [
+                            'tournament_id' => $tournament->id,
+                            'tournament_name' => $tournament->name,
+                            'payment_method' => $tournament->payment_method,
+                            'rejected_reason' => $validated['note'] ?? null,
+                        ],
+                    ]);
+                } catch (\Exception $notifError) {
+                    Log::warning('Failed to create payment rejection notification: ' . $notifError->getMessage());
+                }
             }
 
             // Lưu note nếu có (có thể thêm field payment_note vào bảng tournaments)
@@ -1574,6 +1703,138 @@ class TournamentController extends Controller
 
         } catch (\Exception $e) {
             return ApiResponse::error('Xử lý thất bại: ' . $e->getMessage(), null, 500);
+        }
+    }
+
+    // ================================================================
+    // UPLOAD TOURNAMENT RULES FILE - Upload file thể lệ giải đấu
+    // POST /tournaments/{id}/upload-rules-file
+    // ================================================================
+    public function uploadRulesFile(Request $request, string $id)
+    {
+        try {
+            $tournament = Tournament::findOrFail($id);
+            $currentUser = Auth::user();
+
+            // Chỉ người tạo giải hoặc admin mới được upload
+            if ($tournament->organizer_id !== $currentUser->id && $currentUser->role->name_role !== 'admin') {
+                return ApiResponse::error('Bạn không có quyền upload file thể lệ cho giải này', null, 403);
+            }
+
+            // Validate file
+            $validated = $request->validate([
+                'rules_file' => ['required', 'file', 'mimes:pdf,doc,docx', 'max:10240'], // max 10MB
+            ]);
+
+            // Xóa file cũ nếu có
+            if ($tournament->tournament_rules_file) {
+                $oldPath = public_path('storage/' . $tournament->tournament_rules_file);
+                if (file_exists($oldPath)) {
+                    unlink($oldPath);
+                }
+            }
+
+            // Upload file mới
+            $file = $request->file('rules_file');
+            $extension = $file->getClientOriginalExtension();
+            $originalName = pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME);
+            $safeName = preg_replace('/[^A-Za-z0-9_\-]/', '_', $originalName);
+            $filename = 'tournament_' . $tournament->id . '_rules_' . time() . '_' . $safeName . '.' . $extension;
+            $path = $file->storeAs('tournament_rules', $filename, 'public');
+
+            // Update tournament
+            $tournament->tournament_rules_file = $path;
+            $tournament->save();
+
+            return ApiResponse::success(
+                'Upload file thể lệ giải đấu thành công',
+                [
+                    'tournament_id' => $tournament->id,
+                    'rules_file_url' => asset('storage/' . $path),
+                    'rules_file_name' => $filename,
+                    'file_size' => $file->getSize(),
+                    'file_type' => $extension,
+                ],
+                200
+            );
+
+        } catch (\Exception $e) {
+            return ApiResponse::error('Upload thất bại: ' . $e->getMessage(), null, 500);
+        }
+    }
+
+    // ================================================================
+    // DOWNLOAD TOURNAMENT RULES FILE - Download file thể lệ giải đấu
+    // GET /tournaments/{id}/download-rules-file
+    // ================================================================
+    public function downloadRulesFile(string $id)
+    {
+        try {
+            $tournament = Tournament::findOrFail($id);
+
+            // Kiểm tra có file không
+            if (!$tournament->tournament_rules_file) {
+                return ApiResponse::error('Giải đấu này chưa có file thể lệ', null, 404);
+            }
+
+            $filePath = public_path('storage/' . $tournament->tournament_rules_file);
+
+            // Kiểm tra file có tồn tại không
+            if (!file_exists($filePath)) {
+                return ApiResponse::error('File không tồn tại', null, 404);
+            }
+
+            // Lấy tên file gốc
+            $fileName = basename($tournament->tournament_rules_file);
+
+            // Return file download
+            return response()->download($filePath, $fileName);
+
+        } catch (\Exception $e) {
+            return ApiResponse::error('Download thất bại: ' . $e->getMessage(), null, 500);
+        }
+    }
+
+    // ================================================================
+    // DELETE TOURNAMENT RULES FILE - Xóa file thể lệ giải đấu
+    // DELETE /tournaments/{id}/delete-rules-file
+    // ================================================================
+    public function deleteRulesFile(string $id)
+    {
+        try {
+            $tournament = Tournament::findOrFail($id);
+            $currentUser = Auth::user();
+
+            // Chỉ người tạo giải hoặc admin mới được xóa
+            if ($tournament->organizer_id !== $currentUser->id && $currentUser->role->name_role !== 'admin') {
+                return ApiResponse::error('Bạn không có quyền xóa file thể lệ cho giải này', null, 403);
+            }
+
+            // Kiểm tra có file không
+            if (!$tournament->tournament_rules_file) {
+                return ApiResponse::error('Giải đấu này không có file thể lệ để xóa', null, 404);
+            }
+
+            // Xóa file
+            $filePath = public_path('storage/' . $tournament->tournament_rules_file);
+            if (file_exists($filePath)) {
+                unlink($filePath);
+            }
+
+            // Update tournament
+            $tournament->tournament_rules_file = null;
+            $tournament->save();
+
+            return ApiResponse::success(
+                'Xóa file thể lệ thành công',
+                [
+                    'tournament_id' => $tournament->id,
+                ],
+                200
+            );
+
+        } catch (\Exception $e) {
+            return ApiResponse::error('Xóa file thất bại: ' . $e->getMessage(), null, 500);
         }
     }
 }

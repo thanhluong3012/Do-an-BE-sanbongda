@@ -11,6 +11,7 @@ class Tournament extends Model
     protected $fillable = [
         'name',
         'description',
+        'tournament_rules_file',
         'format',
         'field_type',
         'max_teams',

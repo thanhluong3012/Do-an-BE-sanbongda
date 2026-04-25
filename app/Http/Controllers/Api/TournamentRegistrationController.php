@@ -5,9 +5,13 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\TournamentRegistration;
 use App\Models\Tournament;
+use App\Models\Notification;
 use App\Helpers\ApiResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Mail;
+use App\Mail\TournamentRegistrationApprovedMail;
+use App\Mail\TournamentRegistrationRejectedMail;
 
 class TournamentRegistrationController extends Controller
 {
@@ -136,7 +140,7 @@ class TournamentRegistrationController extends Controller
     public function approve(string $id)
     {
         try {
-            $registration = TournamentRegistration::with('tournament')->findOrFail($id);
+            $registration = TournamentRegistration::with(['tournament', 'team.captain'])->findOrFail($id);
 
             // Chỉ organizer (người tổ chức giải) mới được duyệt đăng ký
             $user = Auth::user();
@@ -159,6 +163,45 @@ class TournamentRegistrationController extends Controller
 
             $registration->update(['registration_status' => 'approved']);
 
+            $captain = $registration->team->captain;
+
+            // ✅ GỬI EMAIL THÔNG BÁO
+            try {
+                if ($captain && $captain->email) {
+                    Mail::to($captain->email)->send(new TournamentRegistrationApprovedMail(
+                        captainName: $captain->name,
+                        teamName: $registration->team->name,
+                        tournamentName: $registration->tournament->name,
+                        startDate: $registration->tournament->start_date->format('d/m/Y'),
+                    ));
+                }
+            } catch (\Exception $mailError) {
+                // Log lỗi nhưng không fail request
+                \Log::warning('Failed to send approval email: ' . $mailError->getMessage());
+            }
+
+            // ✅ TẠO THÔNG BÁO TRONG APP
+            try {
+                if ($captain) {
+                    Notification::create([
+                        'user_id' => $captain->id,
+                        'type' => 'tournament_registration_approved',
+                        'title' => '✅ Đăng ký giải đấu đã được duyệt',
+                        'message' => "Chúc mừng! Đội {$registration->team->name} đã được duyệt tham gia giải {$registration->tournament->name}.",
+                        'data' => [
+                            'tournament_id' => $registration->tournament_id,
+                            'tournament_name' => $registration->tournament->name,
+                            'registration_id' => $registration->id,
+                            'team_id' => $registration->team_id,
+                            'team_name' => $registration->team->name,
+                            'start_date' => $registration->tournament->start_date->format('Y-m-d'),
+                        ],
+                    ]);
+                }
+            } catch (\Exception $notifError) {
+                \Log::warning('Failed to create notification: ' . $notifError->getMessage());
+            }
+
             return ApiResponse::success('Duyệt đăng ký thành công', $registration);
         } catch (\Exception $e) {
             return ApiResponse::error('Lỗi: ' . $e->getMessage(), 500);
@@ -169,7 +212,7 @@ class TournamentRegistrationController extends Controller
     public function reject(Request $request, string $id)
     {
         try {
-            $registration = TournamentRegistration::with('tournament')->findOrFail($id);
+            $registration = TournamentRegistration::with(['tournament', 'team.captain'])->findOrFail($id);
 
             // Chỉ organizer mới được từ chối đăng ký
             $user = Auth::user();
@@ -185,6 +228,45 @@ class TournamentRegistrationController extends Controller
                 'registration_status' => 'rejected',
                 'rejected_reason' => $validated['rejected_reason'],
             ]);
+
+            $captain = $registration->team->captain;
+
+            // ✅ GỬI EMAIL THÔNG BÁO KÈM LÝ DO TỪ CHỐI
+            try {
+                if ($captain && $captain->email) {
+                    Mail::to($captain->email)->send(new TournamentRegistrationRejectedMail(
+                        captainName: $captain->name,
+                        teamName: $registration->team->name,
+                        tournamentName: $registration->tournament->name,
+                        rejectedReason: $validated['rejected_reason'],
+                    ));
+                }
+            } catch (\Exception $mailError) {
+                // Log lỗi nhưng không fail request
+                \Log::warning('Failed to send rejection email: ' . $mailError->getMessage());
+            }
+
+            // ✅ TẠO THÔNG BÁO TRONG APP KÈM LÝ DO
+            try {
+                if ($captain) {
+                    Notification::create([
+                        'user_id' => $captain->id,
+                        'type' => 'tournament_registration_rejected',
+                        'title' => '❌ Đăng ký giải đấu bị từ chối',
+                        'message' => "Rất tiếc, đăng ký của đội {$registration->team->name} tham gia giải {$registration->tournament->name} đã bị từ chối. Lý do: {$validated['rejected_reason']}",
+                        'data' => [
+                            'tournament_id' => $registration->tournament_id,
+                            'tournament_name' => $registration->tournament->name,
+                            'registration_id' => $registration->id,
+                            'team_id' => $registration->team_id,
+                            'team_name' => $registration->team->name,
+                            'rejected_reason' => $validated['rejected_reason'],
+                        ],
+                    ]);
+                }
+            } catch (\Exception $notifError) {
+                \Log::warning('Failed to create notification: ' . $notifError->getMessage());
+            }
 
             return ApiResponse::success('Từ chối đăng ký thành công', $registration);
         } catch (\Exception $e) {
