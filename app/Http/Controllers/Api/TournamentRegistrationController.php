@@ -68,8 +68,8 @@ class TournamentRegistrationController extends Controller
                 return ApiResponse::error('Giải đấu không mở đăng ký', null, 400);
             }
 
-            // Kiểm tra hạn đăng ký
-            if (now() > $tournament->registration_end) {
+            // Kiểm tra hạn đăng ký (cho phép đăng ký đến hết ngày registration_end - 23:59:59)
+            if (now() > $tournament->registration_end->endOfDay()) {
                 return ApiResponse::error('Đã hết hạn đăng ký', null, 400);
             }
 
@@ -297,4 +297,261 @@ class TournamentRegistrationController extends Controller
             return ApiResponse::error('Lỗi: ' . $e->getMessage(), 500);
         }
     }
+
+    /**
+     * Upload payment proof - Team upload bill chuyển khoản
+     */
+    public function uploadPaymentProof(Request $request, string $id)
+    {
+        try {
+            $registration = TournamentRegistration::with(['tournament', 'team'])->find($id);
+
+            if (!$registration) {
+                return ApiResponse::error('Không tìm thấy đăng ký', null, 404);
+            }
+
+            $user = Auth::user();
+
+            // Chỉ đội trưởng mới được upload bill
+            if ($registration->team->captain_user_id !== $user->id) {
+                return ApiResponse::error('Chỉ đội trưởng mới có thể upload bill', null, 403);
+            }
+
+            // Kiểm tra registration đã được approve chưa
+            if ($registration->registration_status !== 'approved') {
+                return ApiResponse::error('Chỉ upload bill cho đăng ký đã được duyệt', null, 400);
+            }
+
+            // Kiểm tra payment_method phải là transfer
+            if ($registration->payment_method !== 'transfer') {
+                return ApiResponse::error('Chỉ thanh toán chuyển khoản mới cần upload bill', null, 400);
+            }
+
+            $validator = \Illuminate\Support\Facades\Validator::make($request->all(), [
+                'payment_proof' => ['required', 'image', 'mimes:jpg,jpeg,png', 'max:2048'],
+            ]);
+
+            if ($validator->fails()) {
+                return ApiResponse::error('Validation failed', $validator->errors(), 422);
+            }
+
+            // Upload file
+            $file = $request->file('payment_proof');
+            $path = $file->store('payment_proofs/tournaments', 'public');
+
+            // Xóa ảnh cũ nếu có
+            if ($registration->payment_proof) {
+                \Illuminate\Support\Facades\Storage::disk('public')->delete($registration->payment_proof);
+            }
+
+            $registration->payment_proof = $path;
+            $registration->save();
+
+            // ✅ Tạo thông báo cho organizer (người tổ chức giải)
+            try {
+                Notification::create([
+                    'user_id' => $registration->tournament->organizer_id,
+                    'type' => 'tournament_payment_bill_uploaded',
+                    'title' => '📄 Đội đã upload bill thanh toán giải đấu',
+                    'message' => "Đội {$registration->team->name} đã upload bill thanh toán cho giải {$registration->tournament->name}. Vui lòng kiểm tra và xác nhận.",
+                    'data' => [
+                        'registration_id' => $registration->id,
+                        'tournament_id' => $registration->tournament_id,
+                        'tournament_name' => $registration->tournament->name,
+                        'team_id' => $registration->team_id,
+                        'team_name' => $registration->team->name,
+                        'payment_proof_url' => asset('storage/' . $path),
+                    ],
+                ]);
+            } catch (\Exception $notifError) {
+                \Illuminate\Support\Facades\Log::warning('Failed to create organizer notification: ' . $notifError->getMessage());
+            }
+
+            return ApiResponse::success(
+                'Upload bill thành công. Chờ BTC xác nhận thanh toán.',
+                [
+                    'registration_id' => $registration->id,
+                    'payment_proof_url' => asset('storage/' . $path),
+                    'payment_status' => $registration->payment_status,
+                ],
+                200
+            );
+        } catch (\Exception $e) {
+            return ApiResponse::error('Upload thất bại', $e->getMessage(), 500);
+        }
+    }
+
+    /**
+     * Confirm payment - BTC xác nhận thanh toán
+     */
+    public function confirmPayment(Request $request, string $id)
+    {
+        try {
+            $registration = TournamentRegistration::with(['tournament', 'team.captain'])->find($id);
+
+            if (!$registration) {
+                return ApiResponse::error('Không tìm thấy đăng ký', null, 404);
+            }
+
+            $user = Auth::user();
+
+            // Chỉ organizer hoặc admin mới được xác nhận thanh toán
+            if ($user->role->name_role !== 'admin' && $registration->tournament->organizer_id !== $user->id) {
+                return ApiResponse::error('Bạn không có quyền xác nhận thanh toán cho đăng ký này', null, 403);
+            }
+
+            // Kiểm tra registration đã được approve chưa
+            if ($registration->registration_status !== 'approved') {
+                return ApiResponse::error('Chỉ xác nhận thanh toán cho đăng ký đã được duyệt', null, 400);
+            }
+
+            // Kiểm tra payment_status đang pending
+            if ($registration->payment_status !== 'pending') {
+                return ApiResponse::error('Đăng ký này không ở trạng thái chờ thanh toán', null, 400);
+            }
+
+            $validator = \Illuminate\Support\Facades\Validator::make($request->all(), [
+                'action' => ['required', 'in:approve,reject'],
+                'note' => ['nullable', 'string', 'max:500'],
+            ]);
+
+            if ($validator->fails()) {
+                return ApiResponse::error('Validation failed', $validator->errors(), 422);
+            }
+
+            // Nếu là transfer, kiểm tra đã upload bill chưa
+            if ($registration->payment_method === 'transfer' && !$registration->payment_proof && $request->action === 'approve') {
+                return ApiResponse::error('Đội chưa upload bill chuyển khoản. Không thể xác nhận thanh toán.', null, 400);
+            }
+
+            // Update payment status
+            if ($request->action === 'approve') {
+                $registration->payment_status = 'paid';
+                $registration->payment_confirmed_at = now();
+                $message = 'Xác nhận thanh toán thành công';
+
+                // ✅ Tạo thông báo cho đội trưởng
+                try {
+                    $captain = $registration->team->captain;
+                    if ($captain) {
+                        Notification::create([
+                            'user_id' => $captain->id,
+                            'type' => 'tournament_payment_approved',
+                            'title' => '✅ Thanh toán giải đấu đã được xác nhận',
+                            'message' => "Thanh toán của đội {$registration->team->name} cho giải {$registration->tournament->name} đã được BTC xác nhận.",
+                            'data' => [
+                                'registration_id' => $registration->id,
+                                'tournament_id' => $registration->tournament_id,
+                                'tournament_name' => $registration->tournament->name,
+                                'team_id' => $registration->team_id,
+                                'team_name' => $registration->team->name,
+                                'payment_status' => 'paid',
+                            ],
+                        ]);
+                    }
+                } catch (\Exception $notifError) {
+                    \Illuminate\Support\Facades\Log::warning('Failed to create payment notification: ' . $notifError->getMessage());
+                }
+            } else {
+                $registration->payment_status = 'failed';
+                $registration->payment_proof = null;  // Xóa bill bị từ chối
+                $message = 'Đã từ chối thanh toán';
+
+                // ✅ Tạo thông báo từ chối
+                try {
+                    $captain = $registration->team->captain;
+                    if ($captain) {
+                        Notification::create([
+                            'user_id' => $captain->id,
+                            'type' => 'tournament_payment_rejected',
+                            'title' => '❌ Thanh toán giải đấu bị từ chối',
+                            'message' => "Thanh toán của đội {$registration->team->name} cho giải {$registration->tournament->name} đã bị BTC từ chối. Lý do: " . ($request->note ?? 'Không có lý do cụ thể'),
+                            'data' => [
+                                'registration_id' => $registration->id,
+                                'tournament_id' => $registration->tournament_id,
+                                'tournament_name' => $registration->tournament->name,
+                                'team_id' => $registration->team_id,
+                                'team_name' => $registration->team->name,
+                                'rejected_reason' => $request->note ?? null,
+                            ],
+                        ]);
+                    }
+                } catch (\Exception $notifError) {
+                    \Illuminate\Support\Facades\Log::warning('Failed to create rejection notification: ' . $notifError->getMessage());
+                }
+            }
+
+            $registration->payment_note = $request->note;
+            $registration->save();
+
+            return ApiResponse::success(
+                $message,
+                [
+                    'registration_id' => $registration->id,
+                    'payment_status' => $registration->payment_status,
+                    'payment_confirmed_at' => $registration->payment_confirmed_at,
+                    'payment_proof' => $registration->payment_proof,
+                    'note' => $request->note ?? null,
+                ],
+                200
+            );
+        } catch (\Exception $e) {
+            return ApiResponse::error('Lỗi xác nhận thanh toán', $e->getMessage(), 500);
+        }
+    }
+
+    /**
+     * Get payment info - Lấy thông tin thanh toán (QR code)
+     */
+    public function getPaymentInfo(string $id)
+    {
+        try {
+            $registration = TournamentRegistration::with(['tournament.organizer.ownerProfile', 'team'])->find($id);
+
+            if (!$registration) {
+                return ApiResponse::error('Không tìm thấy đăng ký', null, 404);
+            }
+
+            $user = Auth::user();
+
+            // Chỉ đội trưởng của đội hoặc organizer mới xem được
+            if ($registration->team->captain_user_id !== $user->id &&
+                $registration->tournament->organizer_id !== $user->id &&
+                $user->role->name_role !== 'admin') {
+                return ApiResponse::error('Bạn không có quyền xem thông tin thanh toán này', null, 403);
+            }
+
+            // Kiểm tra registration đã được approve chưa
+            if ($registration->registration_status !== 'approved') {
+                return ApiResponse::error('Đăng ký chưa được duyệt', null, 400);
+            }
+
+            $data = [
+                'registration_id' => $registration->id,
+                'tournament_name' => $registration->tournament->name,
+                'team_name' => $registration->team->name,
+                'payment_method' => $registration->payment_method,
+                'payment_status' => $registration->payment_status,
+                'payment_proof_url' => $registration->payment_proof_url,
+            ];
+
+            // Nếu là transfer, trả về QR code
+            if ($registration->payment_method === 'transfer') {
+                $organizer = $registration->tournament->organizer;
+                if ($organizer && $organizer->ownerProfile && $organizer->ownerProfile->qr_code_image) {
+                    $data['qr_code_url'] = asset('storage/' . $organizer->ownerProfile->qr_code_image);
+                    $data['bank_info'] = [
+                        'bank_name' => $organizer->ownerProfile->bank_name ?? null,
+                        'account_number' => $organizer->ownerProfile->account_number ?? null,
+                        'account_holder' => $organizer->ownerProfile->account_holder ?? null,
+                    ];
+                }
+            }
+
+            return ApiResponse::success('Thông tin thanh toán', $data, 200);
+        } catch (\Exception $e) {
+            return ApiResponse::error('Lỗi lấy thông tin thanh toán', $e->getMessage(), 500);
+        }
+    }
 }
+

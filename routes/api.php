@@ -172,6 +172,32 @@ Route::middleware('jwt.auth')->group(function () {
     // ==========================================
     Route::apiResource('books', BookController::class);
 
+    // Lấy thông tin thanh toán (bao gồm QR code)
+    Route::get('books/{id}/payment-info', [BookController::class, 'getPaymentInfo']);
+
+    // Upload bill chuyển khoản cho booking
+    Route::post('books/{id}/upload-payment-proof', [BookController::class, 'uploadPaymentProof']);
+
+    // Owner/Admin xác nhận thanh toán
+    Route::put('books/{id}/confirm-payment', [BookController::class, 'confirmPayment']);
+
+    // Lấy các time slots đã được book của một field trong một ngày (PUBLIC - không cần auth)
+    Route::get('fields/{field_id}/booked-slots', [BookController::class, 'getBookedSlots']);
+
+    // Check availability của một time slot cụ thể (PUBLIC - không cần auth)
+    Route::post('fields/{field_id}/check-availability', [BookController::class, 'checkAvailability']);
+
+    // ==========================================
+    // Quản lý thanh toán (Owner/Admin)
+    // ==========================================
+    Route::middleware('check.role:owner,admin')->group(function () {
+        // Danh sách booking chờ xác nhận thanh toán
+        Route::get('bookings/pending-payments', [BookController::class, 'getPendingPayments']);
+
+        // Thống kê thanh toán
+        Route::get('bookings/payment-statistics', [BookController::class, 'getPaymentStatistics']);
+    });
+
     // ==========================================
     // Team (Đội bóng) - Tất cả user đã đăng nhập
     // ==========================================
@@ -249,6 +275,11 @@ Route::middleware('jwt.auth')->group(function () {
     // Routes đặc biệt cho đăng ký giải đấu
     Route::put('tournament-registrations/{id}/approve', [TournamentRegistrationController::class, 'approve']);
     Route::put('tournament-registrations/{id}/reject', [TournamentRegistrationController::class, 'reject']);
+
+    // 🔥 Payment routes cho giải đấu (giống booking sân)
+    Route::post('tournament-registrations/{id}/upload-payment-proof', [TournamentRegistrationController::class, 'uploadPaymentProof']);
+    Route::put('tournament-registrations/{id}/confirm-payment', [TournamentRegistrationController::class, 'confirmPayment']);
+    Route::get('tournament-registrations/{id}/payment-info', [TournamentRegistrationController::class, 'getPaymentInfo']);
 
     // ==========================================
     // Tournament Match (Trận đấu) - Tất cả user đã đăng nhập

@@ -7,6 +7,7 @@ use App\Http\Controllers\Controller;
 use App\Models\FieldCluster;
 use Exception;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 
 class FieldClusterController extends Controller
@@ -255,6 +256,10 @@ class FieldClusterController extends Controller
             if (!$cluster) {
                 return ApiResponse::error('Không tìm thấy cụm sân', null, 404);
             }
+
+            // DEBUG: Log số lượng fields
+            Log::info("FieldCluster ID {$id} has " . $cluster->fields->count() . " fields");
+            Log::info("Fields data: " . json_encode($cluster->fields->pluck('id', 'name')));
 
             return ApiResponse::success('Chi tiết cụm sân', $cluster, 200);
         } catch (Exception $e) {

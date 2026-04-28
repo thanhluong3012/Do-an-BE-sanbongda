@@ -16,6 +16,8 @@ class TournamentRegistration extends Model
         'payment_method',
         'payment_date',
         'payment_proof',
+        'payment_confirmed_at',
+        'payment_note',
         'notes',
         'admin_notes',
         'rejected_reason',
@@ -24,7 +26,23 @@ class TournamentRegistration extends Model
     protected $casts = [
         'registration_date' => 'datetime',
         'payment_date' => 'datetime',
+        'payment_confirmed_at' => 'datetime',
+        'payment_status' => 'string',
+        'payment_method' => 'string',
     ];
+
+    protected $appends = ['payment_proof_url'];
+
+    /**
+     * Accessor để lấy full URL của ảnh bill
+     */
+    public function getPaymentProofUrlAttribute()
+    {
+        if ($this->payment_proof) {
+            return asset('storage/' . $this->payment_proof);
+        }
+        return null;
+    }
 
     // Relationships
     public function tournament(): BelongsTo

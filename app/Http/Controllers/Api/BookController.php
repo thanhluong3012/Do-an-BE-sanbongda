@@ -6,9 +6,11 @@ use App\Helpers\ApiResponse;
 use App\Http\Controllers\Controller;
 use App\Models\Book;
 use App\Models\Field;
+use App\Models\Notification;
 use Exception;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Facades\Log;
 
 class BookController extends Controller
 {
@@ -18,7 +20,7 @@ class BookController extends Controller
      * - Owner: xem booking của sân thuộc về họ
      * - User: xem booking của chính họ
      */
-    public function index()
+    public function index(Request $request)
     {
         try {
             $currentUser = auth('api')->user();
@@ -27,24 +29,55 @@ class BookController extends Controller
                 return ApiResponse::error('Không xác thực được người dùng', null, 401);
             }
 
+            $query = Book::with(['user', 'field.fieldCluster', 'tournament']);
+
             if ($currentUser->role->name_role === 'admin') {
-                $books = Book::with(['user', 'field.fieldCluster'])->get();
+                // Admin xem tất cả
             } elseif ($currentUser->role->name_role === 'owner') {
                 if (!$currentUser->ownerProfile) {
                     return ApiResponse::error('Bạn chưa có owner profile', null, 400);
                 }
 
-                $books = Book::with(['user', 'field.fieldCluster'])
-                    ->whereHas('field.fieldCluster', function ($query) use ($currentUser) {
-                        $query->where('owner_id', $currentUser->ownerProfile->id);
-                    })
-                    ->get();
+                $query->whereHas('field.fieldCluster', function ($q) use ($currentUser) {
+                    $q->where('owner_id', $currentUser->ownerProfile->id);
+                });
             } else {
                 // User thường chỉ xem booking của mình
-                $books = Book::with(['user', 'field.fieldCluster'])
-                    ->where('user_id', $currentUser->id)
-                    ->get();
+                $query->where('user_id', $currentUser->id);
             }
+
+            // Filter theo payment_status
+            if ($request->has('payment_status')) {
+                $query->where('payment_status', $request->payment_status);
+            }
+
+            // Filter theo payment_method
+            if ($request->has('payment_method')) {
+                $query->where('payment_method', $request->payment_method);
+            }
+
+            // 🔥 Filter theo booking_type (regular/tournament) - để phân biệt booking thường và giải đấu
+            if ($request->has('booking_type')) {
+                $query->where('booking_type', $request->booking_type);
+            }
+
+            // 🔥 Filter theo status (pending/confirmed/cancelled/completed)
+            if ($request->has('status')) {
+                $query->where('status', $request->status);
+            }
+
+            // Filter theo ngày
+            if ($request->has('from_date')) {
+                $query->where('day_book', '>=', $request->from_date);
+            }
+            if ($request->has('to_date')) {
+                $query->where('day_book', '<=', $request->to_date);
+            }
+
+            // Sắp xếp theo ngày booking (mới nhất trước)
+            $query->orderBy('day_book', 'desc')->orderBy('start_time', 'desc');
+
+            $books = $query->get();
 
             return ApiResponse::success('Danh sách đặt sân', $books, 200);
         } catch (Exception $e) {
@@ -67,9 +100,10 @@ class BookController extends Controller
             $validator = Validator::make($request->all(), [
                 'field_id' => ['required', 'integer', 'exists:fields,id'],
                 'day_book' => ['required', 'date', 'after_or_equal:today'],
-                'start_time' => ['required', 'date_format:H:i'],
-                'end_time' => ['required', 'date_format:H:i', 'after:start_time'],
+                'start_time' => ['required', 'date_format:H:i:s'],
+                'end_time' => ['required', 'date_format:H:i:s', 'after:start_time'],
                 'total_price' => ['required', 'numeric', 'min:0'],
+                'payment_method' => ['required', 'in:cash,transfer'],
             ]);
 
             if ($validator->fails()) {
@@ -107,14 +141,86 @@ class BookController extends Controller
             $book = Book::create([
                 'user_id' => $currentUser->id,
                 'booking_type' => 'regular',
+                'status' => 'pending',  // 🔥 Trạng thái booking
                 'field_id' => $request->field_id,
                 'day_book' => $request->day_book,
                 'start_time' => $request->start_time,
                 'end_time' => $request->end_time,
                 'total_price' => $request->total_price,
+                'payment_status' => 'pending',  // 🔥 Trạng thái thanh toán
+                'payment_method' => $request->payment_method,
             ]);
 
-            return ApiResponse::success('Đặt sân thành công', $book->load(['user', 'field.fieldCluster']), 201);
+            // Load relationships
+            $book->load(['user', 'field.fieldCluster.owner']);
+
+            // 🔔 Tạo thông báo nhắc nhở thanh toán cho user
+            try {
+                $paymentMethodText = $request->payment_method === 'cash' ? 'tiền mặt tại sân' : 'chuyển khoản và upload bill';
+                Notification::create([
+                    'user_id' => $currentUser->id,
+                    'type' => 'booking_created',
+                    'title' => '⚠️ Vui lòng thanh toán để hoàn tất đặt sân',
+                    'message' => "Bạn đã đặt sân {$book->field->fieldCluster->name} vào ngày {$book->day_book->format('d/m/Y')} ({$book->start_time} - {$book->end_time}). Vui lòng thanh toán {$paymentMethodText} để hoàn tất booking.",
+                    'data' => [
+                        'booking_id' => $book->id,
+                        'field_name' => $book->field->name ?? '',
+                        'field_cluster_name' => $book->field->fieldCluster->name,
+                        'day_book' => $book->day_book,
+                        'start_time' => $book->start_time,
+                        'end_time' => $book->end_time,
+                        'payment_method' => $request->payment_method,
+                        'payment_status' => 'pending',
+                        'total_price' => $request->total_price,
+                        'action_required' => 'payment',
+                    ],
+                ]);
+            } catch (Exception $notifError) {
+                Log::warning('Failed to create booking notification: ' . $notifError->getMessage());
+            }
+
+            // Chuẩn bị payment info với QR code
+            $fieldCluster = $book->field->fieldCluster;
+            $paymentInfo = [
+                'status' => 'pending',
+                'payment_method' => $request->payment_method,
+                'total_price' => $request->total_price,
+            ];
+
+            // Nếu thanh toán qua transfer → trả về QR code của chủ sân
+            if ($request->payment_method === 'transfer') {
+                if ($fieldCluster->owner && $fieldCluster->owner->qr_code_image) {
+                    $paymentInfo['qr_code_url'] = $fieldCluster->owner->qr_code_image;
+                    $paymentInfo['instruction'] = "Vui lòng quét mã QR để chuyển khoản ĐÚNG số tiền: " . number_format($request->total_price) . " VNĐ và ghi nội dung: BOOK-{$book->id}";
+                    $paymentInfo['transfer_note'] = "BOOK-{$book->id}";
+                    $paymentInfo['message'] = 'Vui lòng quét mã QR và chuyển khoản. Sau khi chuyển khoản, upload bill để chủ sân xác nhận.';
+                } else {
+                    $paymentInfo['message'] = 'Chủ sân chưa cập nhật QR code. Vui lòng liên hệ chủ sân để được hướng dẫn thanh toán.';
+                    $paymentInfo['owner_contact'] = [
+                        'name' => $fieldCluster->name,
+                        'phone' => $fieldCluster->phone,
+                        'address' => $fieldCluster->address,
+                    ];
+                }
+            } else {
+                // Thanh toán tiền mặt
+                $paymentInfo['instruction'] = "Vui lòng liên hệ chủ sân để thanh toán tiền mặt. Số tiền: " . number_format($request->total_price) . " VNĐ";
+                $paymentInfo['owner_contact'] = [
+                    'name' => $fieldCluster->name,
+                    'phone' => $fieldCluster->phone,
+                    'address' => $fieldCluster->address,
+                ];
+                $paymentInfo['message'] = 'Vui lòng liên hệ chủ sân để thanh toán tiền mặt.';
+            }
+
+            return ApiResponse::success(
+                'Đặt sân thành công! Vui lòng thanh toán với chủ sân và chờ xác nhận thanh toán để hoàn tất đặt sân.',
+                [
+                    'booking' => $book,
+                    'payment_info' => $paymentInfo,
+                ],
+                201
+            );
         } catch (Exception $e) {
             return ApiResponse::error('Đặt sân thất bại', $e->getMessage(), 500);
         }
@@ -193,8 +299,8 @@ class BookController extends Controller
             $validator = Validator::make($request->all(), [
                 'field_id' => ['sometimes', 'integer', 'exists:fields,id'],
                 'day_book' => ['sometimes', 'date', 'after_or_equal:today'],
-                'start_time' => ['sometimes', 'date_format:H:i'],
-                'end_time' => ['sometimes', 'date_format:H:i', 'after:start_time'],
+                'start_time' => ['sometimes', 'date_format:H:i:s'],
+                'end_time' => ['sometimes', 'date_format:H:i:s', 'after:start_time'],
                 'total_price' => ['sometimes', 'numeric', 'min:0'],
             ]);
 
@@ -288,6 +394,551 @@ class BookController extends Controller
             return ApiResponse::success('Hủy đặt sân thành công', null, 200);
         } catch (Exception $e) {
             return ApiResponse::error('Xóa thất bại', $e->getMessage(), 500);
+        }
+    }
+
+    /**
+     * Upload payment proof (bill chuyển khoản)
+     * User upload ảnh bill để chứng minh đã thanh toán
+     */
+    public function uploadPaymentProof(Request $request, string $id)
+    {
+        try {
+            $book = Book::with(['user', 'field.fieldCluster.owner.user'])->find($id);
+
+            if (!$book) {
+                return ApiResponse::error('Không tìm thấy booking', null, 404);
+            }
+
+            $currentUser = auth('api')->user();
+
+            if (!$currentUser) {
+                return ApiResponse::error('Không xác thực được người dùng', null, 401);
+            }
+
+            // Chỉ user sở hữu booking mới được upload
+            if ($book->user_id !== $currentUser->id) {
+                return ApiResponse::error('Bạn không có quyền upload bill cho booking này', null, 403);
+            }
+
+            // Chỉ booking chọn transfer mới cần upload bill
+            if ($book->payment_method !== 'transfer') {
+                return ApiResponse::error('Booking này thanh toán bằng tiền mặt, không cần upload bill', null, 400);
+            }
+
+            // Kiểm tra booking đang ở trạng thái pending
+            if ($book->payment_status !== 'pending') {
+                return ApiResponse::error('Chỉ có thể upload bill cho booking đang chờ thanh toán', null, 400);
+            }
+
+            $validator = Validator::make($request->all(), [
+                'payment_proof' => ['required', 'image', 'mimes:jpeg,png,jpg', 'max:5120'], // max 5MB
+            ]);
+
+            if ($validator->fails()) {
+                return ApiResponse::error('Validation failed', $validator->errors(), 422);
+            }
+
+            // Xóa bill cũ nếu có
+            if ($book->payment_proof) {
+                $oldPath = public_path('storage/' . $book->payment_proof);
+                if (file_exists($oldPath)) {
+                    unlink($oldPath);
+                }
+            }
+
+            // Upload bill mới
+            $file = $request->file('payment_proof');
+            $filename = 'booking_' . $book->id . '_bill_' . time() . '.' . $file->getClientOriginalExtension();
+            $path = $file->storeAs('payment_proofs', $filename, 'public');
+
+            $book->payment_proof = $path;
+            $book->save();
+
+            // 🔔 Tạo thông báo cho user khi upload bill thành công
+            try {
+                Notification::create([
+                    'user_id' => $book->user_id,
+                    'type' => 'booking_bill_uploaded',
+                    'title' => '✅ Đã upload bill chuyển khoản',
+                    'message' => "Bạn đã upload bill chuyển khoản cho đặt sân tại {$book->field->fieldCluster->name} vào ngày {$book->day_book->format('d/m/Y')}. Vui lòng chờ chủ sân xác nhận thanh toán.",
+                    'data' => [
+                        'booking_id' => $book->id,
+                        'field_cluster_name' => $book->field->fieldCluster->name,
+                        'payment_proof_url' => asset('storage/' . $path),
+                        'status' => 'waiting_confirmation',
+                    ],
+                ]);
+            } catch (Exception $notifError) {
+                Log::warning('Failed to create bill upload notification: ' . $notifError->getMessage());
+            }
+
+            // 🔔 Tạo thông báo cho owner để xác nhận thanh toán
+            try {
+                $fieldCluster = $book->field->fieldCluster;
+                if ($fieldCluster->owner && $fieldCluster->owner->user) {
+                    Notification::create([
+                        'user_id' => $fieldCluster->owner->user->id,
+                        'type' => 'booking_payment_pending',
+                        'title' => '💰 Có booking cần xác nhận thanh toán',
+                        'message' => "User {$book->user->name} đã upload bill chuyển khoản cho booking tại {$fieldCluster->name} vào ngày {$book->day_book->format('d/m/Y')} ({$book->start_time} - {$book->end_time}). Số tiền: " . number_format($book->total_price) . " VNĐ.",
+                        'data' => [
+                            'booking_id' => $book->id,
+                            'user_name' => $book->user->name,
+                            'field_cluster_name' => $fieldCluster->name,
+                            'day_book' => $book->day_book,
+                            'start_time' => $book->start_time,
+                            'end_time' => $book->end_time,
+                            'total_price' => $book->total_price,
+                            'payment_proof_url' => asset('storage/' . $path),
+                            'action_required' => 'confirm_payment',
+                        ],
+                    ]);
+                }
+            } catch (Exception $notifError) {
+                Log::warning('Failed to create owner notification: ' . $notifError->getMessage());
+            }
+
+            return ApiResponse::success(
+                'Upload bill thành công. Chờ chủ sân xác nhận thanh toán.',
+                [
+                    'booking_id' => $book->id,
+                    'payment_proof_url' => asset('storage/' . $path),
+                    'payment_status' => $book->payment_status,
+                ],
+                200
+            );
+        } catch (Exception $e) {
+            return ApiResponse::error('Upload thất bại', $e->getMessage(), 500);
+        }
+    }
+
+    /**
+     * Confirm payment - Owner/Admin xác nhận thanh toán
+     */
+    public function confirmPayment(Request $request, string $id)
+    {
+        try {
+            $book = Book::with(['user', 'field.fieldCluster'])->find($id);
+
+            if (!$book) {
+                return ApiResponse::error('Không tìm thấy booking', null, 404);
+            }
+
+            $currentUser = auth('api')->user();
+
+            if (!$currentUser) {
+                return ApiResponse::error('Không xác thực được người dùng', null, 401);
+            }
+
+            // Chỉ owner của sân hoặc admin mới được xác nhận
+            if ($currentUser->role->name_role !== 'admin') {
+                if ($currentUser->role->name_role !== 'owner' ||
+                    !$currentUser->ownerProfile ||
+                    $book->field->fieldCluster->owner_id !== $currentUser->ownerProfile->id) {
+                    return ApiResponse::error('Bạn không có quyền xác nhận thanh toán cho booking này', null, 403);
+                }
+            }
+
+            // Kiểm tra booking đang ở trạng thái pending
+            if ($book->payment_status !== 'pending') {
+                return ApiResponse::error('Booking này không ở trạng thái chờ thanh toán', null, 400);
+            }
+
+            $validator = Validator::make($request->all(), [
+                'action' => ['required', 'in:approve,reject'],
+                'note' => ['nullable', 'string', 'max:500'],
+            ]);
+
+            if ($validator->fails()) {
+                return ApiResponse::error('Validation failed', $validator->errors(), 422);
+            }
+
+            // Nếu là transfer, kiểm tra đã upload bill chưa
+            if ($book->payment_method === 'transfer' && !$book->payment_proof && $request->action === 'approve') {
+                return ApiResponse::error('User chưa upload bill chuyển khoản. Không thể xác nhận thanh toán.', null, 400);
+            }
+
+            // Update payment status
+            if ($request->action === 'approve') {
+                $book->payment_status = 'paid';
+                $book->status = 'confirmed';  // 🔥 UPDATE booking status
+                $book->payment_confirmed_at = now();
+                $message = 'Xác nhận thanh toán và booking thành công';
+
+                // ✅ Tạo thông báo cho user
+                try {
+                    Notification::create([
+                        'user_id' => $book->user_id,
+                        'type' => 'booking_payment_approved',
+                        'title' => '✅ Thanh toán đặt sân đã được xác nhận',
+                        'message' => "Thanh toán cho đặt sân tại {$book->field->fieldCluster->name} vào ngày {$book->day_book->format('d/m/Y')} ({$book->start_time} - {$book->end_time}) đã được chủ sân xác nhận.",
+                        'data' => [
+                            'booking_id' => $book->id,
+                            'field_name' => $book->field->name ?? '',
+                            'field_cluster_name' => $book->field->fieldCluster->name,
+                            'day_book' => $book->day_book,
+                            'start_time' => $book->start_time,
+                            'end_time' => $book->end_time,
+                            'payment_method' => $book->payment_method,
+                            'payment_status' => 'paid',
+                            'total_price' => $book->total_price,
+                        ],
+                    ]);
+                } catch (Exception $notifError) {
+                    Log::warning('Failed to create booking payment notification: ' . $notifError->getMessage());
+                }
+            } else {
+                $book->payment_status = 'failed';
+                $book->payment_proof = null;  // 🔥 XÓA bill bị từ chối, user phải upload lại
+                $message = 'Đã từ chối thanh toán';
+
+                // ✅ Tạo thông báo từ chối
+                try {
+                    Notification::create([
+                        'user_id' => $book->user_id,
+                        'type' => 'booking_payment_rejected',
+                        'title' => '❌ Thanh toán đặt sân bị từ chối',
+                        'message' => "Thanh toán cho đặt sân tại {$book->field->fieldCluster->name} vào ngày {$book->day_book->format('d/m/Y')} đã bị từ chối. Lý do: " . ($request->note ?? 'Không có lý do cụ thể'),
+                        'data' => [
+                            'booking_id' => $book->id,
+                            'field_name' => $book->field->name ?? '',
+                            'field_cluster_name' => $book->field->fieldCluster->name,
+                            'payment_method' => $book->payment_method,
+                            'rejected_reason' => $request->note ?? null,
+                        ],
+                    ]);
+                } catch (Exception $notifError) {
+                    Log::warning('Failed to create booking payment rejection notification: ' . $notifError->getMessage());
+                }
+            }
+
+            $book->payment_note = $request->note;
+            $book->save();
+
+            return ApiResponse::success(
+                $message,
+                [
+                    'booking_id' => $book->id,
+                    'status' => $book->status,  // 🔥 Trả về booking status
+                    'payment_status' => $book->payment_status,
+                    'payment_confirmed_at' => $book->payment_confirmed_at,
+                    'payment_proof' => $book->payment_proof,
+                    'note' => $request->note ?? null,
+                ],
+                200
+            );
+        } catch (Exception $e) {
+            return ApiResponse::error('Xác nhận thất bại', $e->getMessage(), 500);
+        }
+    }
+
+    /**
+     * Lấy thông tin thanh toán của booking (bao gồm QR code)
+     */
+    public function getPaymentInfo(string $id)
+    {
+        try {
+            $book = Book::with(['user', 'field.fieldCluster.owner'])->find($id);
+
+            if (!$book) {
+                return ApiResponse::error('Không tìm thấy booking', null, 404);
+            }
+
+            $currentUser = auth('api')->user();
+
+            if (!$currentUser) {
+                return ApiResponse::error('Không xác thực được người dùng', null, 401);
+            }
+
+            // User chỉ xem payment info của booking mình
+            if ($currentUser->role->name_role !== 'admin' && $currentUser->role->name_role !== 'owner') {
+                if ($book->user_id !== $currentUser->id) {
+                    return ApiResponse::error('Bạn không có quyền xem thông tin thanh toán này', null, 403);
+                }
+            }
+
+            // Owner chỉ xem payment info của sân thuộc về họ
+            if ($currentUser->role->name_role === 'owner') {
+                if (!$currentUser->ownerProfile || $book->field->fieldCluster->owner_id !== $currentUser->ownerProfile->id) {
+                    return ApiResponse::error('Bạn không có quyền xem thông tin thanh toán này', null, 403);
+                }
+            }
+
+            $fieldCluster = $book->field->fieldCluster;
+            $paymentInfo = [
+                'booking_id' => $book->id,
+                'status' => $book->payment_status,
+                'payment_method' => $book->payment_method,
+                'total_price' => $book->total_price,
+                'payment_proof' => $book->payment_proof,
+                'payment_confirmed_at' => $book->payment_confirmed_at,
+                'payment_note' => $book->payment_note,
+            ];
+
+            // Nếu thanh toán qua chuyển khoản và chưa thanh toán → hiển thị QR code
+            if ($book->payment_method === 'transfer' && $book->payment_status === 'pending') {
+                if ($fieldCluster->owner && $fieldCluster->owner->qr_code_image) {
+                    $paymentInfo['qr_code_url'] = $fieldCluster->owner->qr_code_image;
+                    $paymentInfo['instruction'] = "Vui lòng quét mã QR để chuyển khoản ĐÚNG số tiền: " . number_format($book->total_price) . " VNĐ và ghi nội dung: BOOK-{$book->id}";
+                    $paymentInfo['transfer_note'] = "BOOK-{$book->id}";
+                } else {
+                    $paymentInfo['message'] = 'Chủ sân chưa cập nhật QR code. Vui lòng liên hệ chủ sân.';
+                }
+            }
+
+            // Thông tin liên hệ chủ sân
+            $paymentInfo['owner_contact'] = [
+                'name' => $fieldCluster->name,
+                'phone' => $fieldCluster->phone,
+                'address' => $fieldCluster->address,
+            ];
+
+            return ApiResponse::success('Thông tin thanh toán', $paymentInfo, 200);
+        } catch (Exception $e) {
+            return ApiResponse::error('Lấy thông tin thất bại', $e->getMessage(), 500);
+        }
+    }
+
+    /**
+     * Lấy danh sách booking chờ xác nhận thanh toán (cho Owner/Admin)
+     * Owner xem các booking đã upload bill và chờ xác nhận
+     */
+    public function getPendingPayments()
+    {
+        try {
+            $currentUser = auth('api')->user();
+
+            if (!$currentUser) {
+                return ApiResponse::error('Không xác thực được người dùng', null, 401);
+            }
+
+            // Chỉ owner và admin mới được xem
+            if ($currentUser->role->name_role !== 'owner' && $currentUser->role->name_role !== 'admin') {
+                return ApiResponse::error('Bạn không có quyền truy cập', null, 403);
+            }
+
+            $query = Book::with(['user', 'field.fieldCluster'])
+                ->where('payment_status', 'pending')
+                ->whereNotNull('payment_proof'); // Chỉ lấy những booking đã upload bill
+
+            if ($currentUser->role->name_role === 'owner') {
+                if (!$currentUser->ownerProfile) {
+                    return ApiResponse::error('Bạn chưa có owner profile', null, 400);
+                }
+
+                $query->whereHas('field.fieldCluster', function ($q) use ($currentUser) {
+                    $q->where('owner_id', $currentUser->ownerProfile->id);
+                });
+            }
+
+            $books = $query->orderBy('created_at', 'desc')->get();
+
+            return ApiResponse::success(
+                'Danh sách booking chờ xác nhận thanh toán',
+                [
+                    'total' => $books->count(),
+                    'bookings' => $books,
+                ],
+                200
+            );
+        } catch (Exception $e) {
+            return ApiResponse::error('Lấy danh sách thất bại', $e->getMessage(), 500);
+        }
+    }
+
+    /**
+     * Thống kê thanh toán (cho Owner/Admin)
+     */
+    public function getPaymentStatistics()
+    {
+        try {
+            $currentUser = auth('api')->user();
+
+            if (!$currentUser) {
+                return ApiResponse::error('Không xác thực được người dùng', null, 401);
+            }
+
+            // Chỉ owner và admin mới được xem
+            if ($currentUser->role->name_role !== 'owner' && $currentUser->role->name_role !== 'admin') {
+                return ApiResponse::error('Bạn không có quyền truy cập', null, 403);
+            }
+
+            $query = Book::query();
+
+            if ($currentUser->role->name_role === 'owner') {
+                if (!$currentUser->ownerProfile) {
+                    return ApiResponse::error('Bạn chưa có owner profile', null, 400);
+                }
+
+                $query->whereHas('field.fieldCluster', function ($q) use ($currentUser) {
+                    $q->where('owner_id', $currentUser->ownerProfile->id);
+                });
+            }
+
+            $statistics = [
+                'total_bookings' => $query->count(),
+                'pending_payment' => (clone $query)->where('payment_status', 'pending')->count(),
+                'pending_with_bill' => (clone $query)->where('payment_status', 'pending')->whereNotNull('payment_proof')->count(),
+                'paid' => (clone $query)->where('payment_status', 'paid')->count(),
+                'failed' => (clone $query)->where('payment_status', 'failed')->count(),
+                'total_revenue' => (clone $query)->where('payment_status', 'paid')->sum('total_price'),
+                'pending_revenue' => (clone $query)->where('payment_status', 'pending')->sum('total_price'),
+                'by_payment_method' => [
+                    'cash' => (clone $query)->where('payment_method', 'cash')->count(),
+                    'transfer' => (clone $query)->where('payment_method', 'transfer')->count(),
+                ],
+            ];
+
+            return ApiResponse::success('Thống kê thanh toán', $statistics, 200);
+        } catch (Exception $e) {
+            return ApiResponse::error('Lấy thống kê thất bại', $e->getMessage(), 500);
+        }
+    }
+
+    /**
+     * Lấy các time slots đã được book của một field trong một ngày cụ thể
+     * API này giúp Frontend check available slots chính xác
+     *
+     * GET /api/fields/{field_id}/booked-slots?date=2026-04-28
+     */
+    public function getBookedSlots(Request $request, string $fieldId)
+    {
+        try {
+            // Validate
+            $validator = Validator::make(array_merge($request->all(), ['field_id' => $fieldId]), [
+                'field_id' => ['required', 'integer', 'exists:fields,id'],
+                'date' => ['required', 'date'],
+            ]);
+
+            if ($validator->fails()) {
+                return ApiResponse::error('Validation failed', $validator->errors(), 422);
+            }
+
+            $field = Field::with('fieldCluster')->find($fieldId);
+
+            if (!$field) {
+                return ApiResponse::error('Không tìm thấy sân', null, 404);
+            }
+
+            // Lấy TẤT CẢ bookings của field này trong ngày được chỉ định
+            // Bao gồm cả booking thường và booking giải đấu
+            $bookedSlots = Book::where('field_id', $fieldId)
+                ->where('day_book', $request->date)
+                ->whereNotIn('status', ['cancelled']) // Không tính booking đã hủy
+                ->orderBy('start_time')
+                ->get(['id', 'start_time', 'end_time', 'booking_type', 'tournament_id', 'status', 'payment_status']);
+
+            return ApiResponse::success(
+                'Danh sách time slots đã được đặt',
+                [
+                    'field_id' => (int) $fieldId,
+                    'field_name' => $field->name,
+                    'field_cluster' => $field->fieldCluster->name ?? null,
+                    'date' => $request->date,
+                    'total_booked_slots' => $bookedSlots->count(),
+                    'booked_slots' => $bookedSlots->map(function ($booking) {
+                        return [
+                            'booking_id' => $booking->id,
+                            'start_time' => substr($booking->start_time, 0, 5), // HH:MM
+                            'end_time' => substr($booking->end_time, 0, 5),     // HH:MM
+                            'booking_type' => $booking->booking_type,
+                            'tournament_id' => $booking->tournament_id,
+                            'status' => $booking->status,
+                            'payment_status' => $booking->payment_status,
+                        ];
+                    }),
+                ],
+                200
+            );
+        } catch (Exception $e) {
+            return ApiResponse::error('Lấy thông tin thất bại', $e->getMessage(), 500);
+        }
+    }
+
+    /**
+     * Check xem một time slot cụ thể có available không
+     *
+     * POST /api/fields/{field_id}/check-availability
+     * Body: { "date": "2026-04-28", "start_time": "06:00", "end_time": "08:00" }
+     */
+    public function checkAvailability(Request $request, string $fieldId)
+    {
+        try {
+            // Validate
+            $validator = Validator::make(array_merge($request->all(), ['field_id' => $fieldId]), [
+                'field_id' => ['required', 'integer', 'exists:fields,id'],
+                'date' => ['required', 'date', 'after_or_equal:today'],
+                'start_time' => ['required', 'date_format:H:i:s'],
+                'end_time' => ['required', 'date_format:H:i:s', 'after:start_time'],
+            ]);
+
+            if ($validator->fails()) {
+                return ApiResponse::error('Validation failed', $validator->errors(), 422);
+            }
+
+            $field = Field::find($fieldId);
+
+            if (!$field) {
+                return ApiResponse::error('Không tìm thấy sân', null, 404);
+            }
+
+            // Kiểm tra sân có available không
+            if ($field->status !== 'available') {
+                return ApiResponse::success(
+                    'Sân không khả dụng',
+                    [
+                        'is_available' => false,
+                        'reason' => 'Sân đang trong trạng thái: ' . $field->status,
+                    ],
+                    200
+                );
+            }
+
+            // Kiểm tra conflict với các booking hiện có
+            $conflict = Book::where('field_id', $fieldId)
+                ->where('day_book', $request->date)
+                ->whereNotIn('status', ['cancelled']) // Không tính booking đã hủy
+                ->where(function ($query) use ($request) {
+                    $query->whereBetween('start_time', [$request->start_time, $request->end_time])
+                        ->orWhereBetween('end_time', [$request->start_time, $request->end_time])
+                        ->orWhere(function ($q) use ($request) {
+                            $q->where('start_time', '<=', $request->start_time)
+                                ->where('end_time', '>=', $request->end_time);
+                        });
+                })
+                ->first();
+
+            if ($conflict) {
+                return ApiResponse::success(
+                    'Time slot không khả dụng',
+                    [
+                        'is_available' => false,
+                        'reason' => 'Khung giờ này đã được đặt',
+                        'conflict_booking' => [
+                            'id' => $conflict->id,
+                            'start_time' => substr($conflict->start_time, 0, 5),
+                            'end_time' => substr($conflict->end_time, 0, 5),
+                            'booking_type' => $conflict->booking_type,
+                        ],
+                    ],
+                    200
+                );
+            }
+
+            return ApiResponse::success(
+                'Time slot khả dụng',
+                [
+                    'is_available' => true,
+                    'field_id' => (int) $fieldId,
+                    'date' => $request->date,
+                    'start_time' => $request->start_time,
+                    'end_time' => $request->end_time,
+                ],
+                200
+            );
+        } catch (Exception $e) {
+            return ApiResponse::error('Kiểm tra thất bại', $e->getMessage(), 500);
         }
     }
 }
