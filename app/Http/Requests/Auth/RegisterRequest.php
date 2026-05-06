@@ -28,7 +28,7 @@ class RegisterRequest extends FormRequest
     {
         return [
             'name' => 'required|string|max:255',
-            'email' => 'required|string|email|max:255|unique:users,email',
+            'email' => 'required|string|email:rfc,dns|max:255|unique:users,email',
             'phone' => 'nullable|string|max:20',
             'password' => 'required|string|min:6',
         ];
@@ -48,7 +48,7 @@ class RegisterRequest extends FormRequest
             'name.max' => 'Tên không được vượt quá 255 ký tự',
 
             'email.required' => 'Email là bắt buộc',
-            'email.email' => 'Email không đúng định dạng',
+            'email.email' => 'Email không tồn tại hoặc không hợp lệ. Vui lòng nhập địa chỉ email thật.',
             'email.unique' => 'Email đã được sử dụng',
             'email.max' => 'Email không được vượt quá 255 ký tự',
 

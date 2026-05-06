@@ -16,6 +16,7 @@ use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use Exception;
 
 class OwnerRegistrationController extends Controller
@@ -52,13 +53,15 @@ class OwnerRegistrationController extends Controller
             // Validate
             $validator = Validator::make($request->all(), [
                 'name' => ['required', 'string', 'max:255'],
-                'email' => ['required', 'email', 'max:255', 'unique:owner_registrations,email', 'unique:users,email'],
+                'email' => ['required', 'email:rfc,dns', 'max:255', 'unique:owner_registrations,email', 'unique:users,email'],
                 'phone' => ['required', 'string', 'max:20'],
                 'password' => ['required', 'string', 'min:6'],
                 'image_code' => ['nullable', 'string'],
                 'code_id' => ['nullable', 'string', 'max:20'],
                 'business_name' => ['nullable', 'string', 'max:255'],
                 'address' => ['nullable', 'string'],
+            ], [
+                'email.email' => 'Email không tồn tại hoặc không hợp lệ. Vui lòng nhập địa chỉ email thật.',
             ]);
 
             if ($validator->fails()) {
@@ -70,7 +73,7 @@ class OwnerRegistrationController extends Controller
                 'name' => $request->name,
                 'email' => $request->email,
                 'phone' => $request->phone,
-                'password' => Hash::make($request->password), // Hash password ngay
+                'password' => $request->password, // Lưu tạm plaintext để gửi email khi duyệt
                 'image_code' => $request->image_code,
                 'code_id' => $request->code_id,
                 'business_name' => $request->business_name,
@@ -132,13 +135,16 @@ class OwnerRegistrationController extends Controller
             return ApiResponse::error('Role owner không tồn tại', null, 500);
         }
 
+        $plainPassword = $registration->password; // Lấy plaintext đã lưu lúc đăng ký
+
         $user = User::create([
             'role_id' => $ownerRole->id,
             'name' => $registration->name,
             'email' => $registration->email,
             'phone' => $registration->phone,
-            'password' => $registration->password, // đã hash
+            'password' => Hash::make($plainPassword), // Hash trước khi lưu vào users
             'status' => true,
+            'email_verified_at' => now(), // admin duyệt = đã xác nhận
         ]);
 
         $ownerProfile = OwnerProfile::create([
@@ -166,8 +172,10 @@ class OwnerRegistrationController extends Controller
 
             Mail::to($registration->email)->send(
                 new OwnerRegistrationApprovedMail(
-                    $registration->name,
-                    $registration->business_name
+                    ownerName: $registration->name,
+                    ownerEmail: $registration->email,
+                    ownerPassword: $plainPassword,
+                    businessName: $registration->business_name,
                 )
             );
 

@@ -14,6 +14,8 @@ class OwnerRegistrationApprovedMail extends Mailable
 
     public function __construct(
         public string $ownerName,
+        public string $ownerEmail,
+        public string $ownerPassword,
         public ?string $businessName = null,
     ) {
     }

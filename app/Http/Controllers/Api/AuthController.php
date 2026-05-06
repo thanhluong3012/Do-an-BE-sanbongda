@@ -6,10 +6,14 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\Auth\LoginRequest;
 use App\Http\Requests\Auth\RegisterRequest;
 use App\Helpers\ApiResponse;
+use App\Mail\UserRegistrationMail;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Str;
 use Tymon\JWTAuth\Facades\JWTAuth;
 use Exception;
 
@@ -51,18 +55,36 @@ class AuthController extends Controller
                 );
             }
 
-            // Tạo user mới với role "member" mặc định
-           User::create([
+            // Tạo token xác nhận email (64 ký tự ngẫu nhiên)
+            $verificationToken = Str::random(64);
+
+            // Tạo user mới với role "member" mặc định (chưa xác nhận email)
+            $user = User::create([
                 'role_id' => $memberRole->id,
                 'name' => $request->name,
                 'email' => $request->email,
                 'phone' => $request->phone ?? null,
-                'status' => true, // Mặc định: active
-                'password' => Hash::make($request->password), // Hash password trước khi lưu
+                'status' => true,
+                'password' => Hash::make($request->password),
+                'email_verification_token' => $verificationToken,
             ]);
 
+            // Gửi email xác nhận kèm thông tin tài khoản
+            $verificationUrl = url('/api/auth/verify-email/' . $verificationToken);
+            try {
+                Mail::to($user->email)->send(new UserRegistrationMail(
+                    userName: $user->name,
+                    userEmail: $user->email,
+                    userPassword: $request->password,
+                    verificationUrl: $verificationUrl,
+                ));
+            } catch (Exception $mailError) {
+                Log::warning('Failed to send registration verification email: ' . $mailError->getMessage());
+            }
+
             return ApiResponse::success(
-                'User registered successfully',
+                'Đăng ký thành công! Vui lòng kiểm tra email để xác nhận tài khoản trước khi đăng nhập.',
+                ['email' => $user->email],
                 201
             );
 
@@ -105,7 +127,29 @@ class AuthController extends Controller
             }
 
             // Đăng nhập thành công, lấy thông tin user
+            /** @var \App\Models\User $user */
             $user = $this->guard()->user();
+
+            // Kiểm tra tài khoản có bị khóa không
+            if (!$user->status) {
+                $this->guard()->logout();
+                return ApiResponse::error(
+                    'Login failed',
+                    'Tài khoản của bạn đã bị khóa. Vui lòng liên hệ quản trị viên.',
+                    403
+                );
+            }
+
+            // Chỉ member mới đăng ký qua web mới cần xác nhận email
+            $user->load('role');
+            if ($user->role->name_role === 'member' && !$user->email_verified_at) {
+                $this->guard()->logout();
+                return ApiResponse::error(
+                    'Login failed',
+                    'Tài khoản chưa xác nhận email. Vui lòng kiểm tra hộp thư và nhấn link xác nhận.',
+                    403
+                );
+            }
 
             return ApiResponse::success(
                 'Login successfully',
@@ -279,4 +323,37 @@ class AuthController extends Controller
             );
         }
     }
+
+    /**
+     * XÁC NHẬN EMAIL
+     *
+     * User nhấn link trong email → kích hoạt tài khoản
+     * GET /api/auth/verify-email/{token}
+     */
+    public function verifyEmail(string $token)
+    {
+        $frontendLoginUrl = env('FRONTEND_URL', 'http://localhost:8080') . '/auth';
+
+        $user = User::where('email_verification_token', $token)->first();
+
+        if (!$user) {
+            return redirect($frontendLoginUrl . '?verified=0&reason=invalid');
+        }
+
+        // Kiểm tra token hết hạn (24 giờ kể từ khi tạo tài khoản)
+        if ($user->created_at->addHours(24)->isPast()) {
+            return redirect($frontendLoginUrl . '?verified=0&reason=expired');
+        }
+
+        if ($user->email_verified_at) {
+            return redirect($frontendLoginUrl . '?verified=1&reason=already');
+        }
+
+        $user->email_verified_at = now();
+        $user->email_verification_token = null;
+        $user->save();
+
+        return redirect($frontendLoginUrl . '?verified=1');
+    }
 }
+

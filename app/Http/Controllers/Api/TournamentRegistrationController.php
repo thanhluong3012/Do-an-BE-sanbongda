@@ -5,11 +5,15 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\TournamentRegistration;
 use App\Models\Tournament;
+use App\Models\Team;
 use App\Models\Notification;
 use App\Helpers\ApiResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Validator;
 use App\Mail\TournamentRegistrationApprovedMail;
 use App\Mail\TournamentRegistrationRejectedMail;
 
@@ -35,10 +39,22 @@ class TournamentRegistrationController extends Controller
 
             $user = Auth::user();
 
-            // Admin/BTC xem tất cả đăng ký của giải mình tổ chức
-            if ($user->role->name_role !== 'admin') {
-                // Đội trưởng chỉ xem đăng ký của đội mình
-                $teamIds = \App\Models\Team::where('captain_user_id', $user->id)->pluck('id');
+            // Phân quyền xem danh sách đăng ký
+            if ($user->role->name_role === 'admin') {
+                // Admin xem tất cả
+            } elseif ($request->has('tournament_id')) {
+                // Organizer xem đăng ký của giải mình tổ chức
+                $tournament = Tournament::find($request->tournament_id);
+                if ($tournament && $tournament->organizer_id === $user->id) {
+                    // Organizer: xem tất cả đăng ký của giải đó
+                } else {
+                    // Đội trưởng chỉ xem đăng ký của đội mình
+                    $teamIds = Team::where('captain_user_id', $user->id)->pluck('id');
+                    $query->whereIn('team_id', $teamIds);
+                }
+            } else {
+                // Không filter theo tournament: chỉ cho xem đăng ký của đội mình
+                $teamIds = Team::where('captain_user_id', $user->id)->pluck('id');
                 $query->whereIn('team_id', $teamIds);
             }
 
@@ -77,6 +93,7 @@ class TournamentRegistrationController extends Controller
             if ($tournament->isFull()) {
                 return ApiResponse::error(
                     "Giải đã đủ số đội ({$tournament->max_teams}/{$tournament->max_teams})",
+                    null,
                     400
                 );
             }
@@ -92,7 +109,7 @@ class TournamentRegistrationController extends Controller
 
             // Kiểm tra quyền đội trưởng
             $user = Auth::user();
-            $team = \App\Models\Team::findOrFail($validated['team_id']);
+            $team = Team::findOrFail($validated['team_id']);
             if ($team->captain_user_id !== $user->id) {
                 return ApiResponse::error('Chỉ đội trưởng mới có thể đăng ký', null, 403);
             }
@@ -109,9 +126,13 @@ class TournamentRegistrationController extends Controller
             if ($totalMembers < $minPlayers) {
                 return ApiResponse::error(
                     "Đội phải có ít nhất {$minPlayers} cầu thủ để đăng ký giải {$tournament->field_type}. Hiện tại đội có: {$totalMembers} người (bao gồm đội trưởng)",
+                    null,
                     400
                 );
             }
+
+            // Gán payment_method từ giải đấu vào đăng ký
+            $validated['payment_method'] = $tournament->payment_method;
 
             $registration = TournamentRegistration::create($validated);
 
@@ -142,9 +163,9 @@ class TournamentRegistrationController extends Controller
         try {
             $registration = TournamentRegistration::with(['tournament', 'team.captain'])->findOrFail($id);
 
-            // Chỉ organizer (người tổ chức giải) mới được duyệt đăng ký
+            // Chỉ organizer hoặc admin mới được duyệt đăng ký
             $user = Auth::user();
-            if ($registration->tournament->organizer_id !== $user->id) {
+            if ($user->role->name_role !== 'admin' && $registration->tournament->organizer_id !== $user->id) {
                 return ApiResponse::error('Chỉ người tổ chức giải mới có quyền duyệt đăng ký', null, 403);
             }
 
@@ -177,7 +198,7 @@ class TournamentRegistrationController extends Controller
                 }
             } catch (\Exception $mailError) {
                 // Log lỗi nhưng không fail request
-                \Log::warning('Failed to send approval email: ' . $mailError->getMessage());
+                Log::warning('Failed to send approval email: ' . $mailError->getMessage());
             }
 
             // ✅ TẠO THÔNG BÁO TRONG APP
@@ -199,7 +220,7 @@ class TournamentRegistrationController extends Controller
                     ]);
                 }
             } catch (\Exception $notifError) {
-                \Log::warning('Failed to create notification: ' . $notifError->getMessage());
+                Log::warning('Failed to create notification: ' . $notifError->getMessage());
             }
 
             return ApiResponse::success('Duyệt đăng ký thành công', $registration);
@@ -214,9 +235,9 @@ class TournamentRegistrationController extends Controller
         try {
             $registration = TournamentRegistration::with(['tournament', 'team.captain'])->findOrFail($id);
 
-            // Chỉ organizer mới được từ chối đăng ký
+            // Chỉ organizer hoặc admin mới được từ chối đăng ký
             $user = Auth::user();
-            if ($registration->tournament->organizer_id !== $user->id) {
+            if ($user->role->name_role !== 'admin' && $registration->tournament->organizer_id !== $user->id) {
                 return ApiResponse::error('Chỉ người tổ chức giải mới có quyền từ chối đăng ký', null, 403);
             }
 
@@ -243,7 +264,7 @@ class TournamentRegistrationController extends Controller
                 }
             } catch (\Exception $mailError) {
                 // Log lỗi nhưng không fail request
-                \Log::warning('Failed to send rejection email: ' . $mailError->getMessage());
+                Log::warning('Failed to send rejection email: ' . $mailError->getMessage());
             }
 
             // ✅ TẠO THÔNG BÁO TRONG APP KÈM LÝ DO
@@ -265,7 +286,7 @@ class TournamentRegistrationController extends Controller
                     ]);
                 }
             } catch (\Exception $notifError) {
-                \Log::warning('Failed to create notification: ' . $notifError->getMessage());
+                Log::warning('Failed to create notification: ' . $notifError->getMessage());
             }
 
             return ApiResponse::success('Từ chối đăng ký thành công', $registration);
@@ -327,7 +348,7 @@ class TournamentRegistrationController extends Controller
                 return ApiResponse::error('Chỉ thanh toán chuyển khoản mới cần upload bill', null, 400);
             }
 
-            $validator = \Illuminate\Support\Facades\Validator::make($request->all(), [
+            $validator = Validator::make($request->all(), [
                 'payment_proof' => ['required', 'image', 'mimes:jpg,jpeg,png', 'max:2048'],
             ]);
 
@@ -341,7 +362,7 @@ class TournamentRegistrationController extends Controller
 
             // Xóa ảnh cũ nếu có
             if ($registration->payment_proof) {
-                \Illuminate\Support\Facades\Storage::disk('public')->delete($registration->payment_proof);
+                Storage::disk('public')->delete($registration->payment_proof);
             }
 
             $registration->payment_proof = $path;
@@ -364,7 +385,7 @@ class TournamentRegistrationController extends Controller
                     ],
                 ]);
             } catch (\Exception $notifError) {
-                \Illuminate\Support\Facades\Log::warning('Failed to create organizer notification: ' . $notifError->getMessage());
+                Log::warning('Failed to create organizer notification: ' . $notifError->getMessage());
             }
 
             return ApiResponse::success(
@@ -410,7 +431,7 @@ class TournamentRegistrationController extends Controller
                 return ApiResponse::error('Đăng ký này không ở trạng thái chờ thanh toán', null, 400);
             }
 
-            $validator = \Illuminate\Support\Facades\Validator::make($request->all(), [
+            $validator = Validator::make($request->all(), [
                 'action' => ['required', 'in:approve,reject'],
                 'note' => ['nullable', 'string', 'max:500'],
             ]);
@@ -428,6 +449,7 @@ class TournamentRegistrationController extends Controller
             if ($request->action === 'approve') {
                 $registration->payment_status = 'paid';
                 $registration->payment_confirmed_at = now();
+                $registration->payment_date = now();
                 $message = 'Xác nhận thanh toán thành công';
 
                 // ✅ Tạo thông báo cho đội trưởng
@@ -450,11 +472,15 @@ class TournamentRegistrationController extends Controller
                         ]);
                     }
                 } catch (\Exception $notifError) {
-                    \Illuminate\Support\Facades\Log::warning('Failed to create payment notification: ' . $notifError->getMessage());
+                    Log::warning('Failed to create payment notification: ' . $notifError->getMessage());
                 }
             } else {
                 $registration->payment_status = 'failed';
-                $registration->payment_proof = null;  // Xóa bill bị từ chối
+                // Xóa file bill bị từ chối khỏi storage
+                if ($registration->payment_proof) {
+                    Storage::disk('public')->delete($registration->payment_proof);
+                }
+                $registration->payment_proof = null;
                 $message = 'Đã từ chối thanh toán';
 
                 // ✅ Tạo thông báo từ chối
@@ -477,7 +503,7 @@ class TournamentRegistrationController extends Controller
                         ]);
                     }
                 } catch (\Exception $notifError) {
-                    \Illuminate\Support\Facades\Log::warning('Failed to create rejection notification: ' . $notifError->getMessage());
+                    Log::warning('Failed to create rejection notification: ' . $notifError->getMessage());
                 }
             }
 
@@ -540,11 +566,6 @@ class TournamentRegistrationController extends Controller
                 $organizer = $registration->tournament->organizer;
                 if ($organizer && $organizer->ownerProfile && $organizer->ownerProfile->qr_code_image) {
                     $data['qr_code_url'] = asset('storage/' . $organizer->ownerProfile->qr_code_image);
-                    $data['bank_info'] = [
-                        'bank_name' => $organizer->ownerProfile->bank_name ?? null,
-                        'account_number' => $organizer->ownerProfile->account_number ?? null,
-                        'account_holder' => $organizer->ownerProfile->account_holder ?? null,
-                    ];
                 }
             }
 

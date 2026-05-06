@@ -180,17 +180,11 @@ class TournamentController extends Controller
                         // Tính giờ từ session
                         [$startTime, $endTime] = $this->getSessionTimeRange($booking['session_type']);
 
-                        // Kiểm tra trùng lịch
+                        // Kiểm tra trùng lịch (dùng strict overlap để tránh false positive tại biên buổi)
                         $conflict = \App\Models\Book::where('field_id', $booking['field_id'])
                             ->where('day_book', $booking['date'])
-                            ->where(function ($q) use ($startTime, $endTime) {
-                                $q->whereBetween('start_time', [$startTime, $endTime])
-                                  ->orWhereBetween('end_time', [$startTime, $endTime])
-                                  ->orWhere(function ($query) use ($startTime, $endTime) {
-                                      $query->where('start_time', '<=', $startTime)
-                                            ->where('end_time', '>=', $endTime);
-                                  });
-                            })
+                            ->where('start_time', '<', $endTime)
+                            ->where('end_time', '>', $startTime)
                             ->exists();
 
                         if ($conflict) {
@@ -1396,17 +1390,11 @@ class TournamentController extends Controller
                     // Tính giờ từ session
                     [$startTime, $endTime] = $this->getSessionTimeRange($booking['session_type']);
 
-                    // Kiểm tra trùng lịch
+                    // Kiểm tra trùng lịch (dùng strict overlap để tránh false positive tại biên buổi)
                     $conflict = \App\Models\Book::where('field_id', $booking['field_id'])
                         ->where('day_book', $booking['date'])
-                        ->where(function ($q) use ($startTime, $endTime) {
-                            $q->whereBetween('start_time', [$startTime, $endTime])
-                              ->orWhereBetween('end_time', [$startTime, $endTime])
-                              ->orWhere(function ($query) use ($startTime, $endTime) {
-                                  $query->where('start_time', '<=', $startTime)
-                                        ->where('end_time', '>=', $endTime);
-                              });
-                        })
+                        ->where('start_time', '<', $endTime)
+                        ->where('end_time', '>', $startTime)
                         ->exists();
 
                     if ($conflict) {

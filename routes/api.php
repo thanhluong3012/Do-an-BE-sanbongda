@@ -35,6 +35,9 @@ Route::prefix('auth')->group(function () {
 
     // Đăng nhập: POST /api/auth/login
     Route::post('login', [AuthController::class, 'login']);
+
+    // Xác nhận email: GET /api/auth/verify-email/{token}
+    Route::get('verify-email/{token}', [AuthController::class, 'verifyEmail']);
 });
 
 // Đăng ký làm chủ sân - Public (không cần đăng nhập)

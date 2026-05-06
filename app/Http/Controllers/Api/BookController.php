@@ -7,6 +7,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Book;
 use App\Models\Field;
 use App\Models\Notification;
+use App\Models\Tournament;
 use Exception;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
@@ -565,6 +566,23 @@ class BookController extends Controller
                 $book->status = 'confirmed';  // 🔥 UPDATE booking status
                 $book->payment_confirmed_at = now();
                 $message = 'Xác nhận thanh toán và booking thành công';
+
+                // Nếu booking này thuộc giải đấu, kiểm tra và cập nhật payment_status của giải
+                if ($book->tournament_id) {
+                    $book->save();
+                    $tournament = Tournament::find($book->tournament_id);
+                    if ($tournament && $tournament->payment_status !== 'paid') {
+                        $pendingCount = Book::where('tournament_id', $book->tournament_id)
+                            ->where('payment_status', '!=', 'paid')
+                            ->where('id', '!=', $book->id)
+                            ->count();
+                        if ($pendingCount === 0) {
+                            $tournament->payment_status = 'paid';
+                            $tournament->payment_date = now();
+                            $tournament->save();
+                        }
+                    }
+                }
 
                 // ✅ Tạo thông báo cho user
                 try {
