@@ -55,6 +55,7 @@ class UserController extends Controller
                     'phone' => $request->phone ?? null,
                     'status' => $request->status ?? true,
                     'password' => Hash::make($request->string('password')),
+                    'email_verified_at' => now(),
                 ]);
 
                 return ApiResponse::success('Created user successfully', [], 201);

@@ -20,6 +20,7 @@ class Book extends Model
         'payment_method',
         'payment_proof',
         'payment_confirmed_at',
+        'confirmed_by_user_id',
         'payment_note',
     ];
 
@@ -40,7 +41,7 @@ class Book extends Model
     public function getPaymentProofUrlAttribute()
     {
         if ($this->payment_proof) {
-            return asset('storage/' . $this->payment_proof);
+            return $this->payment_proof;
         }
         return null;
     }
@@ -79,5 +80,13 @@ class Book extends Model
     public function tournament()
     {
         return $this->belongsTo(Tournament::class);
+    }
+
+    /**
+     * Quan hệ với user xác nhận thanh toán (owner/admin)
+     */
+    public function confirmedBy()
+    {
+        return $this->belongsTo(User::class, 'confirmed_by_user_id');
     }
 }

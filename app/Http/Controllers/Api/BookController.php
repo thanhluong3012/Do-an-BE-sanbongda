@@ -34,7 +34,7 @@ class BookController extends Controller
 
             if ($currentUser->role->name_role === 'admin') {
                 // Admin xem tất cả
-            } elseif ($currentUser->role->name_role === 'owner') {
+            } else if ($currentUser->role->name_role === 'owner') {
                 if (!$currentUser->ownerProfile) {
                     return ApiResponse::error('Bạn chưa có owner profile', null, 400);
                 }
@@ -233,7 +233,12 @@ class BookController extends Controller
     public function show(string $id)
     {
         try {
-            $book = Book::with(['user', 'field.fieldCluster'])->find($id);
+            $book = Book::with([
+                'user.role',
+                'field.fieldCluster',
+                'tournament',
+                'confirmedBy.role'
+            ])->find($id);
 
             if (!$book) {
                 return ApiResponse::error('Không tìm thấy booking', null, 404);
@@ -259,7 +264,82 @@ class BookController extends Controller
                 }
             }
 
-            return ApiResponse::success('Chi tiết đặt sân', $book, 200);
+            // 🔥 FORMAT RESPONSE CHI TIẾT HỢP
+            $dayOfWeek = ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'][$book->day_book->dayOfWeek];
+
+            $response = [
+                // 🔑 THÔNG TIN BOOKING
+                'booking_id' => $book->id,
+                'booking_code' => 'BOOK-' . str_pad($book->id, 6, '0', STR_PAD_LEFT),
+                'booking_type' => $book->booking_type,
+                'booking_type_label' => $book->booking_type_label,
+                'status' => $book->status,
+                'created_at' => $book->created_at->format('d/m/Y H:i:s'),
+
+                // ⚽ THÔNG TIN SÂN
+                'field' => [
+                    'id' => $book->field->id,
+                    'name' => $book->field->name,
+                    'type' => $book->field->type ?? null,
+                    'field_cluster' => [
+                        'id' => $book->field->fieldCluster->id,
+                        'name' => $book->field->fieldCluster->name,
+                        'address' => $book->field->fieldCluster->address,
+                        'phone' => $book->field->fieldCluster->phone,
+                    ],
+                ],
+
+                // 📅 THÔNG TIN LỊCH
+                'schedule' => [
+                    'day_book' => $book->day_book->format('Y-m-d'),
+                    'day_book_formatted' => $book->day_book->format('d/m/Y'),
+                    'day_of_week' => $dayOfWeek,
+                    'start_time' => substr($book->start_time, 0, 5),
+                    'end_time' => substr($book->end_time, 0, 5),
+                    'duration_hours' => (strtotime($book->end_time) - strtotime($book->start_time)) / 3600,
+                ],
+
+                // 💰 THÔNG TIN THANH TOÁN
+                'payment' => [
+                    'total_price' => $book->total_price,
+                    'total_price_formatted' => number_format($book->total_price) . ' đ',
+                    'payment_method' => $book->payment_method,
+                    'payment_method_label' => $book->payment_method === 'cash' ? 'Tiền mặt' : 'Chuyển khoản',
+                    'payment_status' => $book->payment_status,
+                    'payment_status_label' => match($book->payment_status) {
+                        'pending' => 'Chờ thanh toán',
+                        'paid' => 'Đã thanh toán',
+                        'failed' => 'Thanh toán thất bại',
+                        default => $book->payment_status,
+                    },
+                    'payment_proof_url' => $book->payment_proof,
+                    'payment_confirmed_at' => $book->payment_confirmed_at?->format('d/m/Y H:i:s'),
+                    'payment_note' => $book->payment_note,
+                    'confirmed_by' => $book->confirmedBy ? [
+                        'id' => $book->confirmedBy->id,
+                        'name' => $book->confirmedBy->name,
+                        'email' => $book->confirmedBy->email,
+                        'role' => $book->confirmedBy->role->name_role,
+                    ] : null,
+                ],
+
+                // 👤 THÔNG TIN NGƯỜI ĐẶT
+                'customer' => [
+                    'id' => $book->user->id,
+                    'name' => $book->user->name,
+                    'email' => $book->user->email,
+                    'phone' => $book->user->phone ?? null,
+                ],
+
+                // 🏆 THÔNG TIN GIẢI ĐẤU (nếu có)
+                'tournament' => $book->tournament ? [
+                    'id' => $book->tournament->id,
+                    'name' => $book->tournament->name,
+                    'status' => $book->tournament->status,
+                ] : null,
+            ];
+
+            return ApiResponse::success('Chi tiết đặt sân', $response, 200);
         } catch (Exception $e) {
             return ApiResponse::error('Lấy thông tin thất bại', $e->getMessage(), 500);
         }
@@ -405,6 +485,7 @@ class BookController extends Controller
     public function uploadPaymentProof(Request $request, string $id)
     {
         try {
+
             $book = Book::with(['user', 'field.fieldCluster.owner.user'])->find($id);
 
             if (!$book) {
@@ -427,33 +508,20 @@ class BookController extends Controller
                 return ApiResponse::error('Booking này thanh toán bằng tiền mặt, không cần upload bill', null, 400);
             }
 
-            // Kiểm tra booking đang ở trạng thái pending
-            if ($book->payment_status !== 'pending') {
-                return ApiResponse::error('Chỉ có thể upload bill cho booking đang chờ thanh toán', null, 400);
+            // Kiểm tra booking đang ở trạng thái pending hoặc failed (để upload lại sau khi bị từ chối)
+            if (!in_array($book->payment_status, ['pending', 'failed'])) {
+                return ApiResponse::error('Chỉ có thể upload bill cho booking đang chờ thanh toán hoặc bị từ chối', null, 400);
             }
 
-            $validator = Validator::make($request->all(), [
-                'payment_proof' => ['required', 'image', 'mimes:jpeg,png,jpg', 'max:5120'], // max 5MB
+            $validated = $request->validate([
+                'payment_proof_url' => ['required', 'string', 'url', 'max:2048'],
             ]);
 
-            if ($validator->fails()) {
-                return ApiResponse::error('Validation failed', $validator->errors(), 422);
-            }
+            $book->payment_proof = $validated['payment_proof_url'];
+            $book->save();
 
-            // Xóa bill cũ nếu có
-            if ($book->payment_proof) {
-                $oldPath = public_path('storage/' . $book->payment_proof);
-                if (file_exists($oldPath)) {
-                    unlink($oldPath);
-                }
-            }
-
-            // Upload bill mới
-            $file = $request->file('payment_proof');
-            $filename = 'booking_' . $book->id . '_bill_' . time() . '.' . $file->getClientOriginalExtension();
-            $path = $file->storeAs('payment_proofs', $filename, 'public');
-
-            $book->payment_proof = $path;
+            // Reset payment_status về pending để owner xét lại (trường hợp upload lại sau khi bị từ chối)
+            $book->payment_status = 'pending';
             $book->save();
 
             // 🔔 Tạo thông báo cho user khi upload bill thành công
@@ -466,7 +534,7 @@ class BookController extends Controller
                     'data' => [
                         'booking_id' => $book->id,
                         'field_cluster_name' => $book->field->fieldCluster->name,
-                        'payment_proof_url' => asset('storage/' . $path),
+                        'payment_proof_url' => $book->payment_proof,
                         'status' => 'waiting_confirmation',
                     ],
                 ]);
@@ -491,7 +559,7 @@ class BookController extends Controller
                             'start_time' => $book->start_time,
                             'end_time' => $book->end_time,
                             'total_price' => $book->total_price,
-                            'payment_proof_url' => asset('storage/' . $path),
+                            'payment_proof_url' => $book->payment_proof,
                             'action_required' => 'confirm_payment',
                         ],
                     ]);
@@ -504,7 +572,7 @@ class BookController extends Controller
                 'Upload bill thành công. Chờ chủ sân xác nhận thanh toán.',
                 [
                     'booking_id' => $book->id,
-                    'payment_proof_url' => asset('storage/' . $path),
+                    'payment_proof_url' => $book->payment_proof,
                     'payment_status' => $book->payment_status,
                 ],
                 200
@@ -565,6 +633,7 @@ class BookController extends Controller
                 $book->payment_status = 'paid';
                 $book->status = 'confirmed';  // 🔥 UPDATE booking status
                 $book->payment_confirmed_at = now();
+                $book->confirmed_by_user_id = $currentUser->id;  // 🔥 LƯU NGƯỜI XÁC NHẬN
                 $message = 'Xác nhận thanh toán và booking thành công';
 
                 // Nếu booking này thuộc giải đấu, kiểm tra và cập nhật payment_status của giải
@@ -608,7 +677,14 @@ class BookController extends Controller
                 }
             } else {
                 $book->payment_status = 'failed';
-                $book->payment_proof = null;  // 🔥 XÓA bill bị từ chối, user phải upload lại
+                // Xóa file bill bị từ chối khỏi storage
+                if ($book->payment_proof) {
+                    $oldPath = public_path('storage/' . $book->payment_proof);
+                    if (file_exists($oldPath)) {
+                        unlink($oldPath);
+                    }
+                }
+                $book->payment_proof = null;  // User phải upload lại
                 $message = 'Đã từ chối thanh toán';
 
                 // ✅ Tạo thông báo từ chối
@@ -720,9 +796,11 @@ class BookController extends Controller
 
     /**
      * Lấy danh sách booking chờ xác nhận thanh toán (cho Owner/Admin)
-     * Owner xem các booking đã upload bill và chờ xác nhận
+     * - transfer: chỉ hiện booking đã upload bill
+     * - cash: hiện tất cả booking cash đang pending
+     * Query params: payment_method (cash|transfer), booking_type (regular|tournament)
      */
-    public function getPendingPayments()
+    public function getPendingPayments(Request $request)
     {
         try {
             $currentUser = auth('api')->user();
@@ -738,7 +816,12 @@ class BookController extends Controller
 
             $query = Book::with(['user', 'field.fieldCluster'])
                 ->where('payment_status', 'pending')
-                ->whereNotNull('payment_proof'); // Chỉ lấy những booking đã upload bill
+                ->where(function ($q) {
+                    // Lấy transfer booking đã upload bill VÀ cash booking (không cần bill)
+                    $q->where(function ($q2) {
+                        $q2->where('payment_method', 'transfer')->whereNotNull('payment_proof');
+                    })->orWhere('payment_method', 'cash');
+                });
 
             if ($currentUser->role->name_role === 'owner') {
                 if (!$currentUser->ownerProfile) {
@@ -750,12 +833,24 @@ class BookController extends Controller
                 });
             }
 
+            // Filter tùy chọn theo payment_method
+            if ($request->has('payment_method')) {
+                $query->where('payment_method', $request->payment_method);
+            }
+
+            // Filter tùy chọn theo booking_type
+            if ($request->has('booking_type')) {
+                $query->where('booking_type', $request->booking_type);
+            }
+
             $books = $query->orderBy('created_at', 'desc')->get();
 
             return ApiResponse::success(
                 'Danh sách booking chờ xác nhận thanh toán',
                 [
                     'total' => $books->count(),
+                    'transfer_pending' => $books->where('payment_method', 'transfer')->count(),
+                    'cash_pending' => $books->where('payment_method', 'cash')->count(),
                     'bookings' => $books,
                 ],
                 200
@@ -782,7 +877,7 @@ class BookController extends Controller
                 return ApiResponse::error('Bạn không có quyền truy cập', null, 403);
             }
 
-            $query = Book::query();
+            $query = Book::with(['field.fieldCluster']);
 
             if ($currentUser->role->name_role === 'owner') {
                 if (!$currentUser->ownerProfile) {
@@ -793,6 +888,44 @@ class BookController extends Controller
                     $q->where('owner_id', $currentUser->ownerProfile->id);
                 });
             }
+
+            // 📊 Thống kê chi tiết theo từng sân
+            $byField = (clone $query)
+                ->selectRaw('field_id,
+                    COUNT(*) as total_bookings,
+                    SUM(CASE WHEN payment_status = "paid" THEN total_price ELSE 0 END) as revenue,
+                    SUM(CASE WHEN payment_status = "pending" THEN total_price ELSE 0 END) as pending_revenue,
+                    COUNT(CASE WHEN payment_status = "paid" THEN 1 END) as paid_count,
+                    COUNT(CASE WHEN payment_status = "pending" THEN 1 END) as pending_count')
+                ->groupBy('field_id')
+                ->get()
+                ->map(function ($item) {
+                    $field = \App\Models\Field::find($item->field_id);
+                    return [
+                        'field_id' => $item->field_id,
+                        'field_name' => $field ? $field->name : 'Unknown',
+                        'total_bookings' => $item->total_bookings,
+                        'paid_count' => $item->paid_count,
+                        'pending_count' => $item->pending_count,
+                        'revenue' => (float) $item->revenue,
+                        'pending_revenue' => (float) $item->pending_revenue,
+                    ];
+                });
+
+            // 📊 Thống kê theo loại booking
+            $byBookingType = (clone $query)
+                ->selectRaw('booking_type,
+                    COUNT(*) as total_bookings,
+                    SUM(CASE WHEN payment_status = "paid" THEN total_price ELSE 0 END) as revenue')
+                ->groupBy('booking_type')
+                ->get()
+                ->keyBy('booking_type')
+                ->map(function ($item) {
+                    return [
+                        'total_bookings' => $item->total_bookings,
+                        'revenue' => (float) $item->revenue,
+                    ];
+                });
 
             $statistics = [
                 'total_bookings' => $query->count(),
@@ -806,6 +939,8 @@ class BookController extends Controller
                     'cash' => (clone $query)->where('payment_method', 'cash')->count(),
                     'transfer' => (clone $query)->where('payment_method', 'transfer')->count(),
                 ],
+                'by_field' => $byField,
+                'by_booking_type' => $byBookingType,
             ];
 
             return ApiResponse::success('Thống kê thanh toán', $statistics, 200);

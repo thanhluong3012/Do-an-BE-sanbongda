@@ -27,19 +27,23 @@ class TournamentController extends Controller
                 $query->where('format', $request->format);
             }
 
+            // 🔥 Phân quyền xem giải đấu
+            $user = Auth::user();
+
             // Nếu có tham số my_tournaments=true, chỉ lấy giải của user đang login
             if ($request->has('my_tournaments') && $request->my_tournaments == 'true') {
-                $query->where('organizer_id', Auth::id());
+                $query->where('organizer_id', $user->id);
             }
-            // Nếu không có tham số, hiển thị tất cả giải công khai (status != draft)
-            elseif (!$request->has('my_tournaments')) {
-                $user = Auth::user();
-                // Admin xem tất cả
-                if ($user->role->name_role !== 'admin') {
-                    // User thường xem: giải công khai + giải của mình
+            // Nếu không có tham số my_tournaments → Phân quyền theo role
+            else {
+                if ($user->role->name_role === 'admin') {
+                    // Admin xem tất cả giải (kể cả draft của mọi người)
+                }
+                else {
+                    // Owner/User: Xem giải công khai (đã publish) + giải của mình (kể cả draft)
                     $query->where(function($q) use ($user) {
-                        $q->where('status', '!=', 'draft')
-                          ->orWhere('organizer_id', $user->id);
+                        $q->where('status', '!=', 'draft')  // Giải đã publish (open/in_progress/completed...)
+                          ->orWhere('organizer_id', $user->id); // HOẶC giải của mình (kể cả draft)
                     });
                 }
             }
@@ -136,6 +140,12 @@ class TournamentController extends Controller
                 $totalPrice = 0;
 
                 if (!empty($validated['bookings'])) {
+                    // Fix lỗ hổng 3: Giới hạn số booking hợp lý
+                    $maxBookings = $tournament->max_teams * 10;
+                    if (count($validated['bookings']) > $maxBookings) {
+                        throw new \Exception("Số sân book ({" . count($validated['bookings']) . "}) vượt quá giới hạn cho phép ({$maxBookings}) của giải này");
+                    }
+
                     foreach ($validated['bookings'] as $booking) {
                         $field = \App\Models\Field::findOrFail($booking['field_id']);
 
@@ -149,12 +159,24 @@ class TournamentController extends Controller
                             throw new \Exception("Sân '{$field->name}' (ID: {$field->id}) không khả dụng (trạng thái: {$field->status})");
                         }
 
+                        // Fix lỗ hổng 1: Kiểm tra field_type của sân có phù hợp với giải không
+                        $compatibleTypes = match ($tournament->field_type) {
+                            '5v5'   => ['5v5'],
+                            '7v7'   => ['7v7', '5v5'],
+                            '11v11' => ['11v11', '7v7', '5v5'],
+                            default => [$tournament->field_type],
+                        };
+                        if (!in_array($field->field_type, $compatibleTypes)) {
+                            throw new \Exception("Sân '{$field->name}' (loại {$field->field_type}) không phù hợp với giải {$tournament->field_type}. Chỉ chấp nhận: " . implode(', ', $compatibleTypes));
+                        }
+
                         // Lấy giá
                         $dayOfWeek = Carbon::parse($booking['date'])->dayOfWeek;
                         $dayType = in_array($dayOfWeek, [0, 6]) ? 'weekend' : 'weekday';
 
+                        // Fix lỗ hổng 2: Tra giá theo field_type thực tế của sân, không phải của giải
                         $price = \App\Models\TournamentSessionPrice::where('field_cluster_id', $tournament->field_cluster_id)
-                            ->where('field_type', $tournament->field_type)
+                            ->where('field_type', $field->field_type)
                             ->where('day_type', $dayType)
                             ->where('session_type', $booking['session_type'])
                             ->first();
@@ -172,7 +194,7 @@ class TournamentController extends Controller
 
                             throw new \Exception(
                                 "Cụm sân '{$clusterName}' chưa cấu hình giá theo buổi cho giải đấu. " .
-                                "Loại sân: {$tournament->field_type}, Ngày: {$dayTypeVN}, Buổi: {$sessionTypeVN}. " .
+                                "Loại sân: {$field->field_type}, Ngày: {$dayTypeVN}, Buổi: {$sessionTypeVN}. " .
                                 "Vui lòng liên hệ chủ sân để cấu hình giá hoặc chọn cụm sân khác."
                             );
                         }
@@ -180,11 +202,12 @@ class TournamentController extends Controller
                         // Tính giờ từ session
                         [$startTime, $endTime] = $this->getSessionTimeRange($booking['session_type']);
 
-                        // Kiểm tra trùng lịch (dùng strict overlap để tránh false positive tại biên buổi)
+                        // Fix lỗ hổng 4: Dùng lockForUpdate() để tránh race condition
                         $conflict = \App\Models\Book::where('field_id', $booking['field_id'])
                             ->where('day_book', $booking['date'])
                             ->where('start_time', '<', $endTime)
                             ->where('end_time', '>', $startTime)
+                            ->lockForUpdate()
                             ->exists();
 
                         if ($conflict) {
@@ -201,6 +224,8 @@ class TournamentController extends Controller
                             'start_time' => $startTime,
                             'end_time' => $endTime,
                             'total_price' => $price->price_per_session,
+                            'payment_method' => $validated['payment_method'],
+                            'payment_status' => 'pending',
                         ]);
 
                         $totalPrice += $price->price_per_session;
@@ -284,7 +309,8 @@ class TournamentController extends Controller
 
             } catch (\Exception $e) {
                 DB::rollBack();
-                throw $e;
+                // Fix lỗi 500: lỗi nghiệp vụ trong transaction trả về 400 thay vì 500
+                return ApiResponse::error($e->getMessage(), null, 400);
             }
         } catch (\Exception $e) {
             return ApiResponse::error('Lỗi: ' . $e->getMessage(), null, 500);
@@ -298,7 +324,7 @@ class TournamentController extends Controller
             $user = Auth::user();
             $tournament = Tournament::with([
                 'organizer',
-                'fieldCluster',
+                'fieldCluster.owner',
                 'schedules',
                 'registrations.team.captain',
                 'groups.standings.team',
@@ -308,10 +334,15 @@ class TournamentController extends Controller
             // Kiểm tra quyền xem
             // Admin: xem tất cả
             // Organizer: xem giải của mình (kể cả draft)
+            // Owner cụm sân: xem giải tại cụm sân của mình (kể cả draft)
             // User khác: chỉ xem giải public (status != draft)
             $userRole = $user->role ? $user->role->name_role : null;
             if ($userRole !== 'admin') {
-                if ($tournament->organizer_id !== $user->id && $tournament->status === 'draft') {
+                $isFieldClusterOwner = $tournament->fieldCluster
+                    && $tournament->fieldCluster->owner
+                    && $tournament->fieldCluster->owner->user_id === $user->id;
+
+                if ($tournament->organizer_id !== $user->id && !$isFieldClusterOwner && $tournament->status === 'draft') {
                     return ApiResponse::error('Bạn không có quyền xem giải đấu này', null, 403);
                 }
             }
@@ -1360,6 +1391,12 @@ class TournamentController extends Controller
                 $totalPrice = 0;
                 $bookingsCreated = [];
 
+                // Fix lỗ hổng 3: Giới hạn số booking hợp lý
+                $maxBookings = $tournament->max_teams * 10;
+                if (count($validated['bookings']) > $maxBookings) {
+                    return ApiResponse::error("Số sân book (" . count($validated['bookings']) . ") vượt quá giới hạn cho phép ({$maxBookings}) của giải này", null, 400);
+                }
+
                 foreach ($validated['bookings'] as $booking) {
                     $field = \App\Models\Field::findOrFail($booking['field_id']);
 
@@ -1373,28 +1410,41 @@ class TournamentController extends Controller
                         throw new \Exception("Sân {$field->id} không khả dụng");
                     }
 
+                    // Fix lỗ hổng 1: Kiểm tra field_type của sân có phù hợp với giải không
+                    $compatibleTypes = match ($tournament->field_type) {
+                        '5v5'   => ['5v5'],
+                        '7v7'   => ['7v7', '5v5'],
+                        '11v11' => ['11v11', '7v7', '5v5'],
+                        default => [$tournament->field_type],
+                    };
+                    if (!in_array($field->field_type, $compatibleTypes)) {
+                        throw new \Exception("Sân '{$field->name}' (loại {$field->field_type}) không phù hợp với giải {$tournament->field_type}. Chỉ chấp nhận: " . implode(', ', $compatibleTypes));
+                    }
+
                     // Lấy giá
                     $dayOfWeek = Carbon::parse($booking['date'])->dayOfWeek;
                     $dayType = in_array($dayOfWeek, [0, 6]) ? 'weekend' : 'weekday';
 
+                    // Fix lỗ hổng 2: Tra giá theo field_type thực tế của sân, không phải của giải
                     $price = \App\Models\TournamentSessionPrice::where('field_cluster_id', $tournament->field_cluster_id)
-                        ->where('field_type', $tournament->field_type)
+                        ->where('field_type', $field->field_type)
                         ->where('day_type', $dayType)
                         ->where('session_type', $booking['session_type'])
                         ->first();
 
                     if (!$price) {
-                        throw new \Exception("Chưa có giá cho {$tournament->field_type} - {$dayType} - {$booking['session_type']}");
+                        throw new \Exception("Chưa có giá cho {$field->field_type} - {$dayType} - {$booking['session_type']}");
                     }
 
                     // Tính giờ từ session
                     [$startTime, $endTime] = $this->getSessionTimeRange($booking['session_type']);
 
-                    // Kiểm tra trùng lịch (dùng strict overlap để tránh false positive tại biên buổi)
+                    // Fix lỗ hổng 4: Dùng lockForUpdate() để tránh race condition
                     $conflict = \App\Models\Book::where('field_id', $booking['field_id'])
                         ->where('day_book', $booking['date'])
                         ->where('start_time', '<', $endTime)
                         ->where('end_time', '>', $startTime)
+                        ->lockForUpdate()
                         ->exists();
 
                     if ($conflict) {
@@ -1426,7 +1476,8 @@ class TournamentController extends Controller
                 ]);
             } catch (\Exception $e) {
                 DB::rollBack();
-                throw $e;
+                // Fix lỗi 500: lỗi nghiệp vụ trong transaction trả về 400 thay vì 500
+                return ApiResponse::error($e->getMessage(), null, 400);
             }
         } catch (\Exception $e) {
             return ApiResponse::error('Lỗi: ' . $e->getMessage(), null, 500);
@@ -1542,7 +1593,7 @@ class TournamentController extends Controller
     }
 
     // ================================================================
-    // UPLOAD PAYMENT PROOF (BILL) - User upload ảnh bill chuyển khoản
+    // UPLOAD PAYMENT PROOF (BILL) - FE upload lên Supabase rồi gửi URL về
     // ================================================================
     public function uploadPaymentProof(Request $request, string $id)
     {
@@ -1560,40 +1611,38 @@ class TournamentController extends Controller
                 return ApiResponse::error('Giải này thanh toán bằng tiền mặt, không cần upload bill', null, 400);
             }
 
-            // Validate
+            // FE upload ảnh lên Supabase rồi gửi URL về đây
             $validated = $request->validate([
-                'payment_proof' => ['required', 'image', 'mimes:jpeg,png,jpg', 'max:5120'], // max 5MB
+                'payment_proof_url' => ['required', 'string', 'url', 'max:2048'],
             ]);
 
-            // Xóa bill cũ nếu có
-            if ($tournament->payment_proof) {
-                $oldPath = public_path('storage/' . $tournament->payment_proof);
-                if (file_exists($oldPath)) {
-                    unlink($oldPath);
-                }
-            }
-
-            // Upload bill mới
-            $file = $request->file('payment_proof');
-            $filename = 'tournament_' . $tournament->id . '_bill_' . time() . '.' . $file->getClientOriginalExtension();
-            $path = $file->storeAs('payment_proofs', $filename, 'public');
-
-            // Update tournament
-            $tournament->payment_proof = $path;
+            // Lưu URL Supabase trực tiếp vào DB
+            $tournament->payment_proof = $validated['payment_proof_url'];
             $tournament->save();
 
+            // 🔥 Đồng bộ bill sang tất cả bookings của giải đấu
+            $updatedBookings = \App\Models\Book::where('tournament_id', $tournament->id)
+                ->where('booking_type', 'tournament')
+                ->update([
+                    'payment_proof' => $validated['payment_proof_url'],
+                    'payment_status' => 'pending', // Reset về pending để owner xét lại
+                ]);
+
+            Log::info("Synced payment proof to {$updatedBookings} bookings for tournament #{$tournament->id}");
+
             return ApiResponse::success(
-                'Upload bill thành công. Chờ chủ sân xác nhận thanh toán.',
+                'Cập nhật bill thành công. Chờ chủ sân xác nhận thanh toán.',
                 [
                     'tournament_id' => $tournament->id,
-                    'payment_proof_url' => asset('storage/' . $path),
+                    'payment_proof_url' => $tournament->payment_proof,
                     'payment_status' => $tournament->payment_status,
+                    'synced_bookings' => $updatedBookings,
                 ],
                 200
             );
 
         } catch (\Exception $e) {
-            return ApiResponse::error('Upload thất bại: ' . $e->getMessage(), null, 500);
+            return ApiResponse::error('Cập nhật bill thất bại: ' . $e->getMessage(), null, 500);
         }
     }
 
@@ -1633,6 +1682,18 @@ class TournamentController extends Controller
                 $tournament->payment_date = now();
                 $message = 'Xác nhận thanh toán thành công';
 
+                // 🔥 Đồng bộ payment status sang tất cả bookings của giải đấu
+                $updatedBookings = \App\Models\Book::where('tournament_id', $tournament->id)
+                    ->where('booking_type', 'tournament')
+                    ->update([
+                        'payment_status' => 'paid',
+                        'status' => 'confirmed',
+                        'payment_confirmed_at' => now(),
+                        'payment_method' => $tournament->payment_method,
+                    ]);
+
+                Log::info("Approved payment for {$updatedBookings} bookings of tournament #{$tournament->id}");
+
                 // ✅ Tạo thông báo cho người tổ chức giải
                 try {
                     \App\Models\Notification::create([
@@ -1653,29 +1714,54 @@ class TournamentController extends Controller
                     Log::warning('Failed to create payment notification: ' . $notifError->getMessage());
                 }
             } else {
-                $tournament->payment_status = 'failed';
-                $message = 'Đã từ chối thanh toán';
+                // 🔥 TỪ CHỐI THANH TOÁN = HỦY GIẢI LUÔN
+                $message = 'Đã từ chối thanh toán và hủy giải đấu';
 
-                // ✅ Tạo thông báo từ chối
+                $tournamentName = $tournament->name;
+                $organizerId = $tournament->organizer_id;
+                $rejectedReason = $validated['note'] ?? 'Không có lý do cụ thể';
+
+                // ✅ Tạo thông báo trước khi xóa giải
                 try {
                     \App\Models\Notification::create([
-                        'user_id' => $tournament->organizer_id,
+                        'user_id' => $organizerId,
                         'type' => 'tournament_payment_rejected',
-                        'title' => '❌ Thanh toán giải đấu bị từ chối',
-                        'message' => "Thanh toán cho giải đấu \"{$tournament->name}\" đã bị từ chối. Lý do: " . ($validated['note'] ?? 'Không có lý do cụ thể'),
+                        'title' => '❌ Giải đấu bị hủy do từ chối thanh toán',
+                        'message' => "Giải đấu \"{$tournamentName}\" đã bị hủy vì thanh toán bị từ chối. Lý do: {$rejectedReason}. Bạn có thể tạo giải đấu mới.",
                         'data' => [
-                            'tournament_id' => $tournament->id,
-                            'tournament_name' => $tournament->name,
-                            'payment_method' => $tournament->payment_method,
-                            'rejected_reason' => $validated['note'] ?? null,
+                            'tournament_name' => $tournamentName,
+                            'rejected_reason' => $rejectedReason,
+                            'action_available' => 'Bạn có thể tạo giải đấu mới ngay bây giờ',
                         ],
                     ]);
                 } catch (\Exception $notifError) {
                     Log::warning('Failed to create payment rejection notification: ' . $notifError->getMessage());
                 }
+
+                // 🔥 XÓA TẤT CẢ BOOKINGS VÀ GIẢI LUÔN
+                $deletedBookings = \App\Models\Book::where('tournament_id', $tournament->id)
+                    ->where('booking_type', 'tournament')
+                    ->delete();
+
+                Log::info("Deleted {$deletedBookings} bookings and tournament #{$tournament->id} due to payment rejection");
+
+                // Xóa giải đấu
+                $tournament->delete();
+
+                return ApiResponse::success(
+                    $message,
+                    [
+                        'tournament_name' => $tournamentName,
+                        'status' => 'deleted',
+                        'rejected_reason' => $rejectedReason,
+                        'deleted_bookings' => $deletedBookings,
+                        'message' => 'Giải đấu đã bị hủy. Bạn có thể tạo giải mới.',
+                    ],
+                    200
+                );
             }
 
-            // Lưu note nếu có (có thể thêm field payment_note vào bảng tournaments)
+            // Lưu note nếu có (chỉ khi approve)
             $tournament->save();
 
             return ApiResponse::success(

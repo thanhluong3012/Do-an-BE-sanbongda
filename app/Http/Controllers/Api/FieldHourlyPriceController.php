@@ -232,10 +232,16 @@ class FieldHourlyPriceController extends Controller
     /**
      * Public API - Danh sách giá theo giờ cho khách hàng (không cần đăng nhập)
      */
-    public function publicIndex()
+    public function publicIndex(Request $request)
     {
         try {
-            $prices = FieldHourlyPrice::with('fieldCluster')->get();
+            $query = FieldHourlyPrice::with('fieldCluster');
+
+            if ($request->filled('field_cluster_id')) {
+                $query->where('field_cluster_id', $request->field_cluster_id);
+            }
+
+            $prices = $query->get();
 
             return ApiResponse::success('Danh sách giá theo giờ', $prices, 200);
         } catch (Exception $e) {

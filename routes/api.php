@@ -57,9 +57,9 @@ Route::prefix('public')->group(function () {
     Route::get('field-hourly-prices', [FieldHourlyPriceController::class, 'publicIndex']);
     Route::get('field-hourly-prices/{id}', [FieldHourlyPriceController::class, 'publicShow']);
 
-    // Giải đấu (chỉ xem, không đăng ký)
-    Route::get('tournaments', [TournamentController::class, 'publicIndex']);
-    Route::get('tournaments/{id}', [TournamentController::class, 'publicShow']);
+    // 🔥 Giải đấu công khai (prefix 'public' để tránh conflict với authenticated routes)
+    Route::get('public/tournaments', [TournamentController::class, 'publicIndex']);
+    Route::get('public/tournaments/{id}', [TournamentController::class, 'publicShow']);
 
     // Xem lịch thi đấu/bracket (có logic kiểm tra quyền bên trong controller)
     Route::get('tournaments/{id}/bracket', [TournamentController::class, 'getBracket']);

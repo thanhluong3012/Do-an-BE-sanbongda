@@ -3,12 +3,14 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Mail\StaffCreatedMail;
 use App\Models\Staff;
 use App\Models\User;
 use App\Models\Role;
 use App\Helpers\ApiResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\DB;
 use Exception;
@@ -76,11 +78,14 @@ class StaffController extends Controller
             // Validate - KHÔNG nhận user_id, owner_id, role_id từ request
             $validator = Validator::make($request->all(), [
                 'name' => ['required', 'string', 'max:255'],
-                'email' => ['required', 'email', 'max:255', 'unique:users,email'],
+                'email' => ['required', 'email:rfc,dns', 'max:255', 'unique:users,email'],
                 'phone' => ['required', 'string', 'max:20'],
                 'password' => ['required', 'string', 'min:6'],
-                'code_id' => ['nullable', 'string', 'max:20'],
+                'code_id' => ['required', 'string', 'max:20'],
                 'avatar' => ['nullable', 'string'],
+            ], [
+                'email.email' => 'Email không hợp lệ hoặc tên miền không tồn tại',
+                'email.unique' => 'Email này đã được sử dụng',
             ]);
 
             if ($validator->fails()) {
@@ -114,7 +119,18 @@ class StaffController extends Controller
 
             DB::commit();
 
-            // TODO: Gửi email cho nhân viên với thông tin đăng nhập
+            // Gửi email thông báo cho nhân viên với thông tin đăng nhập
+            try {
+                Mail::to($request->email)->send(new StaffCreatedMail(
+                    staffName: $request->name,
+                    staffEmail: $request->email,
+                    staffPassword: $request->password,
+                    ownerName: $currentUser->name,
+                ));
+            } catch (Exception $mailException) {
+                // Không rollback nếu gửi mail thất bại, chỉ log lại
+                logger()->error('Gửi email nhân viên thất bại: ' . $mailException->getMessage());
+            }
 
             return ApiResponse::success(
                 'Tạo nhân viên thành công',
