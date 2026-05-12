@@ -203,8 +203,10 @@ class TournamentController extends Controller
                         [$startTime, $endTime] = $this->getSessionTimeRange($booking['session_type']);
 
                         // Fix lỗ hổng 4: Dùng lockForUpdate() để tránh race condition
+                        // 🔥 CHỈ kiểm tra booking đang active (pending/confirmed), bỏ qua booking đã cancelled
                         $conflict = \App\Models\Book::where('field_id', $booking['field_id'])
                             ->where('day_book', $booking['date'])
+                            ->whereIn('status', ['pending', 'confirmed'])
                             ->where('start_time', '<', $endTime)
                             ->where('end_time', '>', $startTime)
                             ->lockForUpdate()
@@ -1721,44 +1723,42 @@ class TournamentController extends Controller
                 $organizerId = $tournament->organizer_id;
                 $rejectedReason = $validated['note'] ?? 'Không có lý do cụ thể';
 
-                // ✅ Tạo thông báo trước khi xóa giải
+                // 🔥 CẬP NHẬT STATUS BOOKING (KHÔNG XÓA - giữ lại để xem lịch sử)
+                $updatedBookings = \App\Models\Book::where('tournament_id', $tournament->id)
+                    ->where('booking_type', 'tournament')
+                    ->update([
+                        'payment_status' => 'failed',
+                        'status' => 'cancelled',  // Hủy để giải phóng khung giờ
+                        'payment_note' => $rejectedReason,
+                    ]);
+
+                Log::info("🔥 [TOURNAMENT REJECT] Cancelled {$updatedBookings} bookings and tournament #{$tournament->id} (NOT DELETED)", [
+                    'tournament_id' => $tournament->id,
+                    'updated_bookings' => $updatedBookings,
+                ]);
+
+                // 🔥 CẬP NHẬT GIẢI ĐẤU (KHÔNG XÓA - giữ lại để xem lịch sử)
+                $tournament->payment_status = 'failed';
+                $tournament->status = 'cancelled';  // Hủy giải
+
+                // ✅ Tạo thông báo
                 try {
                     \App\Models\Notification::create([
                         'user_id' => $organizerId,
                         'type' => 'tournament_payment_rejected',
-                        'title' => '❌ Giải đấu bị hủy do từ chối thanh toán',
-                        'message' => "Giải đấu \"{$tournamentName}\" đã bị hủy vì thanh toán bị từ chối. Lý do: {$rejectedReason}. Bạn có thể tạo giải đấu mới.",
+                        'title' => '❌ Thanh toán giải đấu bị từ chối',
+                        'message' => "Thanh toán cho giải đấu \"{$tournamentName}\" đã bị chủ sân từ chối. Lý do: {$rejectedReason}. Giải đấu đã bị hủy nhưng vẫn lưu lịch sử. Bạn có thể tạo giải mới.",
                         'data' => [
+                            'tournament_id' => $tournament->id,
                             'tournament_name' => $tournamentName,
                             'rejected_reason' => $rejectedReason,
-                            'action_available' => 'Bạn có thể tạo giải đấu mới ngay bây giờ',
+                            'status' => 'cancelled',
+                            'action_available' => 'Bạn vẫn có thể xem lịch sử giải đấu này hoặc tạo giải mới',
                         ],
                     ]);
                 } catch (\Exception $notifError) {
                     Log::warning('Failed to create payment rejection notification: ' . $notifError->getMessage());
                 }
-
-                // 🔥 XÓA TẤT CẢ BOOKINGS VÀ GIẢI LUÔN
-                $deletedBookings = \App\Models\Book::where('tournament_id', $tournament->id)
-                    ->where('booking_type', 'tournament')
-                    ->delete();
-
-                Log::info("Deleted {$deletedBookings} bookings and tournament #{$tournament->id} due to payment rejection");
-
-                // Xóa giải đấu
-                $tournament->delete();
-
-                return ApiResponse::success(
-                    $message,
-                    [
-                        'tournament_name' => $tournamentName,
-                        'status' => 'deleted',
-                        'rejected_reason' => $rejectedReason,
-                        'deleted_bookings' => $deletedBookings,
-                        'message' => 'Giải đấu đã bị hủy. Bạn có thể tạo giải mới.',
-                    ],
-                    200
-                );
             }
 
             // Lưu note nếu có (chỉ khi approve)

@@ -123,8 +123,10 @@ class BookController extends Controller
             }
 
             // Kiểm tra trùng lịch (bao gồm cả tournament bookings và regular bookings)
+            // 🔥 CHỈ kiểm tra booking đang active (pending/confirmed), bỏ qua booking đã cancelled
             $conflictBooking = Book::where('field_id', $request->field_id)
                 ->where('day_book', $request->day_book)
+                ->whereIn('status', ['pending', 'confirmed'])
                 ->where(function ($query) use ($request) {
                     $query->whereBetween('start_time', [$request->start_time, $request->end_time])
                         ->orWhereBetween('end_time', [$request->start_time, $request->end_time])
@@ -588,6 +590,12 @@ class BookController extends Controller
     public function confirmPayment(Request $request, string $id)
     {
         try {
+            Log::info('🔍 [BOOK CONFIRM] API /books/{id}/confirm-payment ĐƯỢC GỌI', [
+                'booking_id' => $id,
+                'action' => $request->action,
+                'note' => $request->note,
+            ]);
+
             $book = Book::with(['user', 'field.fieldCluster'])->find($id);
 
             if (!$book) {
@@ -677,6 +685,15 @@ class BookController extends Controller
                 }
             } else {
                 $book->payment_status = 'failed';
+                $book->status = 'cancelled';  // 🔥 HỦY booking để giải phóng khung giờ (KHÔNG xóa, giữ lại để user xem lịch sử)
+
+                Log::info('🔥 [BOOK REJECT] Booking #{$book->id} cancelled (NOT DELETED)', [
+                    'booking_id' => $book->id,
+                    'tournament_id' => $book->tournament_id,
+                    'status' => 'cancelled',
+                    'payment_status' => 'failed',
+                ]);
+
                 // Xóa file bill bị từ chối khỏi storage
                 if ($book->payment_proof) {
                     $oldPath = public_path('storage/' . $book->payment_proof);
@@ -685,7 +702,7 @@ class BookController extends Controller
                     }
                 }
                 $book->payment_proof = null;  // User phải upload lại
-                $message = 'Đã từ chối thanh toán';
+                $message = 'Đã từ chối thanh toán. Booking đã bị hủy nhưng vẫn lưu lịch sử.';
 
                 // ✅ Tạo thông báo từ chối
                 try {
@@ -693,13 +710,14 @@ class BookController extends Controller
                         'user_id' => $book->user_id,
                         'type' => 'booking_payment_rejected',
                         'title' => '❌ Thanh toán đặt sân bị từ chối',
-                        'message' => "Thanh toán cho đặt sân tại {$book->field->fieldCluster->name} vào ngày {$book->day_book->format('d/m/Y')} đã bị từ chối. Lý do: " . ($request->note ?? 'Không có lý do cụ thể'),
+                        'message' => "Thanh toán cho đặt sân tại {$book->field->fieldCluster->name} vào ngày {$book->day_book->format('d/m/Y')} đã bị từ chối. Lý do: " . ($request->note ?? 'Không có lý do cụ thể') . ($book->tournament_id ? ' Booking này thuộc giải đấu.' : ''),
                         'data' => [
                             'booking_id' => $book->id,
                             'field_name' => $book->field->name ?? '',
                             'field_cluster_name' => $book->field->fieldCluster->name,
                             'payment_method' => $book->payment_method,
                             'rejected_reason' => $request->note ?? null,
+                            'tournament_id' => $book->tournament_id,
                         ],
                     ]);
                 } catch (Exception $notifError) {

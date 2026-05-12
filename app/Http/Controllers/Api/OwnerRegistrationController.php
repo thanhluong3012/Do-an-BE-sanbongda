@@ -55,7 +55,7 @@ class OwnerRegistrationController extends Controller
                 'name' => ['required', 'string', 'max:255'],
                 'email' => ['required', 'email:rfc,dns', 'max:255', 'unique:owner_registrations,email', 'unique:users,email'],
                 'phone' => ['required', 'string', 'max:20'],
-                'password' => ['required', 'string', 'min:6'],
+                // 'password' => ['required', 'string', 'min:6'],
                 'image_code' => ['nullable', 'string'],
                 'code_id' => ['nullable', 'string', 'max:20'],
                 'business_name' => ['nullable', 'string', 'max:255'],
@@ -73,7 +73,7 @@ class OwnerRegistrationController extends Controller
                 'name' => $request->name,
                 'email' => $request->email,
                 'phone' => $request->phone,
-                'password' => $request->password, // Lưu tạm plaintext để gửi email khi duyệt
+                'password' => '123456', // Lưu plaintext để gửi email khi duyệt (sẽ hash khi tạo User)
                 'image_code' => $request->image_code,
                 'code_id' => $request->code_id,
                 'business_name' => $request->business_name,
@@ -135,14 +135,14 @@ class OwnerRegistrationController extends Controller
             return ApiResponse::error('Role owner không tồn tại', null, 500);
         }
 
-        $plainPassword = $registration->password; // Lấy plaintext đã lưu lúc đăng ký
+        $plainPassword = $registration->password; // Lấy plaintext đã lưu lúc đăng ký (chưa hash)
 
         $user = User::create([
             'role_id' => $ownerRole->id,
             'name' => $registration->name,
             'email' => $registration->email,
             'phone' => $registration->phone,
-            'password' => Hash::make($plainPassword), // Hash trước khi lưu vào users
+            'password' => Hash::make($plainPassword), // Hash 1 lần trước khi lưu vào users
             'status' => true,
             'email_verified_at' => now(), // admin duyệt = đã xác nhận
         ]);
