@@ -35,7 +35,7 @@ class TournamentController extends Controller
             if ($request->has('my_tournaments') && $request->my_tournaments == 'true') {
                 // Lấy danh sách team mà user là captain
                 $userTeamIds = \App\Models\Team::where('captain_user_id', $user->id)->pluck('id');
-                
+
                 // Lấy danh sách tournament_id mà các team của user đã đăng ký
                 $participatingTournamentIds = \App\Models\TournamentRegistration::whereIn('team_id', $userTeamIds)
                     ->pluck('tournament_id')
@@ -259,6 +259,7 @@ class TournamentController extends Controller
                             'user_id' => $userId,
                             'tournament_id' => $tournament->id,
                             'booking_type' => 'tournament',
+                            'status' => 'pending', // 🔥 CHỜ OWNER XÁC NHẬN BOOKING
                             'field_id' => $booking['field_id'],
                             'day_book' => $booking['date'],
                             'start_time' => $startTime,
@@ -693,7 +694,7 @@ class TournamentController extends Controller
                 'registrations.team' // Eager load team relationship
             ])->findOrFail($id);
 
-            
+
             $user = Auth::user();
             if ($tournament->organizer_id !== $user->id) {
                 return ApiResponse::error('Chỉ người tổ chức giải mới có quyền tạo lịch thi đấu', null, 403);
@@ -709,7 +710,7 @@ class TournamentController extends Controller
                     400
                 );
             }
-            
+
             $validated = $request->validate([
                 'start_date'         => 'required|date',
                 'time_slots'         => 'nullable|array|min:1',
@@ -748,7 +749,7 @@ class TournamentController extends Controller
 
             // Lấy field_ids từ bookings (nếu không truyền vào)
             $fieldIds = $validated['field_ids'] ?? $bookings->pluck('field_id')->unique()->values()->toArray();
-           
+
             if (empty($fieldIds)) {
                 return ApiResponse::error('Không có sân nào để tạo lịch', null, 400);
             }
@@ -764,7 +765,7 @@ class TournamentController extends Controller
             $daysBetweenRounds = (int) ($validated['days_between_rounds'] ?? 3);
             $numGroups        = (int) ($validated['num_groups'] ?? 2);
             $teamsPerGroup    = isset($validated['teams_per_group']) ? (int)$validated['teams_per_group'] : null;
-            
+
             // Thời gian trận đấu (phút)
             $matchDuration = (int) ($validated['match_duration'] ?? match($tournament->field_type) {
                 '5v5' => 50,
@@ -773,18 +774,18 @@ class TournamentController extends Controller
                 default => 60,
             });
             $preparationTime = (int) ($validated['preparation_time'] ?? 15);
-            
+
             // New options
             $createThirdPlaceMatch = (bool) ($validated['create_third_place_match'] ?? false);
             $shuffleTeams = (bool) ($validated['shuffle_teams'] ?? true);
             $autoFillThirdPlace = (bool) ($validated['auto_fill_third_place'] ?? true);
-            
+
             DB::beginTransaction();
-            
+
             try {
                 // Use service for schedule generation
                 $scheduleService = new TournamentScheduleService();
-                
+
                 $result = match ($tournament->format) {
                     'knockout'       => $scheduleService->generateKnockout(
                         tournament: $tournament,
@@ -825,7 +826,7 @@ class TournamentController extends Controller
                         autoFillThirdPlace: $autoFillThirdPlace
                     ),
                 };
-               
+
                 $tournament->update(['status' => 'in_progress']);
                 DB::commit();
 
@@ -1176,11 +1177,14 @@ class TournamentController extends Controller
                         'user_id' => $user->id,
                         'tournament_id' => $tournament->id,
                         'booking_type' => 'tournament',
+                        'status' => 'pending', // 🔥 CHỜ OWNER XÁC NHẬN BOOKING
                         'field_id' => $booking['field_id'],
                         'day_book' => $booking['date'],
                         'start_time' => $startTime,
                         'end_time' => $endTime,
                         'total_price' => $price->price_per_session,
+                        'payment_method' => $tournament->payment_method,
+                        'payment_status' => 'pending', // 🔥 CHỜ OWNER XÁC NHẬN THANH TOÁN
                     ]);
 
                     $totalPrice += $price->price_per_session;
@@ -1512,6 +1516,22 @@ class TournamentController extends Controller
                 'action' => ['required', 'in:approve,reject'],
                 'note' => ['nullable', 'string', 'max:500'],
             ]);
+
+            // 🔥 KIỂM TRA TẤT CẢ BOOKING CỦA GIẢI ĐẤU ĐÃ ĐƯỢC XÁC NHẬN CHƯA
+            if ($validated['action'] === 'approve') {
+                $unconfirmedBookings = \App\Models\Book::where('tournament_id', $tournament->id)
+                    ->where('booking_type', 'tournament')
+                    ->where('status', '!=', 'confirmed')
+                    ->count();
+
+                if ($unconfirmedBookings > 0) {
+                    return ApiResponse::error(
+                        "Không thể xác nhận thanh toán. Còn {$unconfirmedBookings} booking giải đấu chưa được xác nhận. Vui lòng xác nhận tất cả booking trước khi xác nhận thanh toán.",
+                        null,
+                        400
+                    );
+                }
+            }
 
             // Nếu là transfer, kiểm tra đã upload bill chưa
             if ($tournament->payment_method === 'transfer' && !$tournament->payment_proof && $validated['action'] === 'approve') {
