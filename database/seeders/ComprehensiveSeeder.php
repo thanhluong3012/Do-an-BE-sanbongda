@@ -23,16 +23,26 @@ class ComprehensiveSeeder extends Seeder
 {
     private $fieldTypes = ['5v5', '7v7', '11v11'];
     private $tournamentFormats = [
+        // Knockout với số đội chẵn (power of 2) - CHỈ CHẤP NHẬN SỐ ĐỘI LÀ 2^n
         ['format' => 'knockout', 'max_teams' => 4, 'field_type' => '5v5'],
-        ['format' => 'round_robin', 'max_teams' => 5, 'field_type' => '5v5'],
         ['format' => 'knockout', 'max_teams' => 8, 'field_type' => '7v7'],
-        ['format' => 'round_robin', 'max_teams' => 10, 'field_type' => '7v7'],
-        ['format' => 'knockout', 'max_teams' => 12, 'field_type' => '11v11'],
         ['format' => 'knockout', 'max_teams' => 16, 'field_type' => '11v11'],
         ['format' => 'knockout', 'max_teams' => 32, 'field_type' => '11v11'],
-        ['format' => 'group_knockout', 'max_teams' => 16, 'field_type' => '7v7'],
         ['format' => 'knockout', 'max_teams' => 64, 'field_type' => '11v11'],
+        
+        // Round Robin - không giới hạn số đội
+        ['format' => 'round_robin', 'max_teams' => 5, 'field_type' => '5v5'],
+        ['format' => 'round_robin', 'max_teams' => 10, 'field_type' => '7v7'],
+        
+        // Group Knockout với số bảng chẵn
+        ['format' => 'group_knockout', 'max_teams' => 16, 'field_type' => '7v7'],
         ['format' => 'group_knockout', 'max_teams' => 32, 'field_type' => '11v11'],
+        
+        // Group Knockout với số bảng lẻ (odd groups - cần lấy thêm đội xếp hạng 3, 4...)
+        ['format' => 'group_knockout', 'max_teams' => 10, 'field_type' => '5v5'], // 5 bảng x 2 đội
+        ['format' => 'group_knockout', 'max_teams' => 15, 'field_type' => '7v7'], // 3 bảng x 5 đội hoặc 5 bảng x 3 đội
+        ['format' => 'group_knockout', 'max_teams' => 21, 'field_type' => '7v7'], // 7 bảng x 3 đội
+        ['format' => 'group_knockout', 'max_teams' => 18, 'field_type' => '11v11'], // 3 bảng x 6 đội (có 6 đội vào knockout)
     ];
 
     private $positions = ['Thủ môn', 'Hậu vệ', 'Tiền vệ', 'Tiền đạo'];
@@ -51,16 +61,16 @@ class ComprehensiveSeeder extends Seeder
         echo "📝 Tạo 10 tài khoản đặt sân cá nhân...\n";
         $individualUsers = $this->createIndividualUsers(10);
 
-        // 2. Tạo 30 tài khoản có đội bóng (mỗi đội 10 thành viên)
-        echo "⚽ Tạo 30 tài khoản với đội bóng (mỗi đội 10 thành viên)...\n";
-        $teamCaptains = $this->createTeamCaptainsWithTeams(30);
+        // 2. Tạo 65 tài khoản có đội bóng (mỗi đội 10 thành viên)
+        echo "⚽ Tạo 65 tài khoản với đội bóng (mỗi đội 10 thành viên)...\n";
+        $teamCaptains = $this->createTeamCaptainsWithTeams(65);
 
         // 3. Tạo 20 tài khoản chủ sân với cụm sân
         echo "🏟️  Tạo 20 tài khoản chủ sân với cụm sân...\n";
         $owners = $this->createOwnersWithFieldClusters(20);
 
-        // 4. Tạo 10 tài khoản tổ chức giải đấu
-        echo "🏆 Tạo 10 giải đấu với các thể thức khác nhau...\n";
+        // 4. Tạo các giải đấu với các thể thức khác nhau
+        echo "🏆 Tạo " . count($this->tournamentFormats) . " giải đấu với các thể thức khác nhau...\n";
         $tournaments = $this->createTournamentsWithRegistrations($owners);
 
         echo "\n✅ Hoàn thành seed dữ liệu!\n";

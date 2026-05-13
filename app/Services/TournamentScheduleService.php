@@ -163,47 +163,22 @@ class TournamentScheduleService
             throw new \Exception('Cần ít nhất 2 đội để tạo giải loại trực tiếp.');
         }
 
+        // Kiểm tra số đội phải là lũy thừa của 2
+        if (!$this->isPowerOfTwo($n)) {
+            throw new \Exception("Thể thức knockout chỉ chấp nhận số đội là lũy thừa của 2 (2, 4, 8, 16, 32, 64...). Hiện có {$n} đội.");
+        }
+
         // Tìm số đội bracket chuẩn (lũy thừa của 2)
-        $bracketSize = $this->getNextPowerOfTwo($n);
-        $numByeTeams = $bracketSize - $n;
+        $bracketSize = $n; // Vì đã validate là power of 2
+        $numByeTeams = 0; // Không có bye teams
         $numRounds = (int) log($bracketSize, 2);
 
-        // Chọn ngẫu nhiên các đội để bye vào vòng trong
-        $teamsWithBye = $teamList->values()->all();
-        $byeTeamIndices = [];
-        
-        if ($numByeTeams > 0) {
-            // Chọn ngẫu nhiên $numByeTeams từ $n đội
-            $allIndices = range(0, $n - 1);
-            shuffle($allIndices);
-            $byeTeamIndices = array_slice($allIndices, 0, $numByeTeams);
-            $byeTeamIndices = array_flip($byeTeamIndices); // Chuyển thành key map
-        }
-        
-        // Xáo trộn lại danh sách với bye teams ở cuối
-        $rearrangedTeams = [];
-        for ($i = 0; $i < $n; $i++) {
-            if (!isset($byeTeamIndices[$i])) {
-                $rearrangedTeams[] = $teamsWithBye[$i];
-            }
-        }
-        // Thêm bye teams vào cuối
-        for ($i = 0; $i < $n; $i++) {
-            if (isset($byeTeamIndices[$i])) {
-                $rearrangedTeams[] = $teamsWithBye[$i];
-            }
-        }
-        // Thêm null cho bye slots
-        for ($i = 0; $i < $numByeTeams; $i++) {
-            $rearrangedTeams[] = null; // null = BYE slot
-        }
-        
-        // Tạo bracket ban đầu (vòng 1)
+        // Tạo bracket ban đầu (vòng 1) - ghép cặp tuần tự
         $currentBracket = [];
         for ($i = 0; $i < $bracketSize / 2; $i++) {
             $currentBracket[] = [
-                'home' => $rearrangedTeams[$i * 2] ?? null,
-                'away' => $rearrangedTeams[$i * 2 + 1] ?? null,
+                'home' => $teamList[$i * 2],
+                'away' => $teamList[$i * 2 + 1],
             ];
         }
 
@@ -255,52 +230,15 @@ class TournamentScheduleService
                     $awayFromPosition = $awayFromMatchId ? "Thắng trận #{$previousRoundMatches[$idx * 2 + 1]->match_number}" : null;
                 }
 
-                // Xử lý BYE: team gặp BYE tự động vào vòng sau, KHÔNG tạo trận
-                if ($home === null && $away === null) {
-                    if ($r === 0) {
-                        // Vòng 1: Cả 2 đều null = không nên xảy ra, bỏ qua
-                        continue;
-                    } else {
-                        // Vòng sau: Cả 2 đều null = trận placeholder chờ kết quả vòng trước
-                        $pairings[] = [
-                            'home_id' => null,
-                            'away_id' => null,
-                            'home_from_match_id' => $homeFromMatchId,
-                            'away_from_match_id' => $awayFromMatchId,
-                            'home_from_position' => $homeFromPosition,
-                            'away_from_position' => $awayFromPosition,
-                            'winner' => null,
-                        ];
-                    }
-                } elseif ($home === null) {
-                    // Home BYE -> Away tự động vào vòng sau, KHÔNG tạo trận
-                    // Đánh dấu winner để vòng sau biết
-                    $pairings[] = [
-                        'home_id' => null,
-                        'away_id' => null,
-                        'winner' => $away, // Away tự động thắng
-                        'is_bye' => true,
-                    ];
-                } elseif ($away === null) {
-                    // Away BYE -> Home tự động vào vòng sau, KHÔNG tạo trận
-                    $pairings[] = [
-                        'home_id' => null,
-                        'away_id' => null,
-                        'winner' => $home, // Home tự động thắng
-                        'is_bye' => true,
-                    ];
-                } else {
-                    // Trận đấu bình thường
-                    $pairings[] = [
-                        'home_id' => $home ? $home->id : null,
-                        'away_id' => $away ? $away->id : null,
-                        'home_from_match_id' => $homeFromMatchId,
-                        'away_from_match_id' => $awayFromMatchId,
-                        'home_from_position' => $homeFromPosition,
-                        'away_from_position' => $awayFromPosition,
-                        'winner' => null, // Chưa biết
-                    ];
-                }
+                // Trận đấu bình thường (không có bye vì đã validate số đội là power of 2)
+                $pairings[] = [
+                    'home_id' => $home ? $home->id : null,
+                    'away_id' => $away ? $away->id : null,
+                    'home_from_match_id' => $homeFromMatchId,
+                    'away_from_match_id' => $awayFromMatchId,
+                    'home_from_position' => $homeFromPosition,
+                    'away_from_position' => $awayFromPosition,
+                ];
             }
 
             // Assign matches vào slots
@@ -327,24 +265,15 @@ class TournamentScheduleService
             // Lưu matches của vòng này để link cho vòng tiếp theo
             $previousRoundMatches = $matches->all();
 
-            // Chuẩn bị bracket cho vòng tiếp theo
-            $nextBracket = [];
-            foreach ($pairings as $pair) {
-                if ($pair['winner']) {
-                    // Đội có BYE tự động vào vòng sau
-                    $nextBracket[] = $pair['winner'];
-                } else {
-                    // Chờ kết quả trận đấu - tạo placeholder
-                    $nextBracket[] = null;
-                }
-            }
+            // Chuẩn bị bracket cho vòng tiếp theo (tất cả đều là placeholder chờ kết quả)
+            $nextBracket = array_fill(0, count($pairings), null);
 
             // Ghép cặp cho vòng tiếp theo
             $currentBracket = [];
             for ($i = 0; $i < count($nextBracket) / 2; $i++) {
                 $currentBracket[] = [
-                    'home' => $nextBracket[$i * 2] ?? null,
-                    'away' => $nextBracket[$i * 2 + 1] ?? null,
+                    'home' => null,
+                    'away' => null,
                 ];
             }
 
@@ -400,13 +329,11 @@ class TournamentScheduleService
             'format' => 'knockout',
             'teams' => $n,
             'bracket_size' => $bracketSize,
-            'bye_teams' => $numByeTeams,
+            'bye_teams' => 0,
             'rounds_created' => $numRounds + ($createThirdPlaceMatch ? 1 : 0),
             'matches_created' => $totalMatches,
             'create_third_place_match' => $createThirdPlaceMatch,
-            'note' => $numByeTeams > 0 
-                ? "Có {$numByeTeams} đội được BYE (tự động vào vòng tiếp theo)." 
-                : 'Bracket chuẩn, không có BYE.',
+            'note' => 'Bracket chuẩn với số đội là lũy thừa của 2.',
         ];
     }
 
@@ -1052,5 +979,13 @@ class TournamentScheduleService
             'group_stage' => 'Vòng bảng',
             default => ucfirst(str_replace('_', ' ', $type)),
         };
+    }
+
+    /**
+     * Kiểm tra xem một số có phải là lũy thừa của 2 hay không
+     */
+    private function isPowerOfTwo(int $n): bool
+    {
+        return $n > 0 && ($n & ($n - 1)) === 0;
     }
 }
