@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Tournament;
 use App\Helpers\ApiResponse;
+use App\Services\TournamentScheduleService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -30,9 +31,21 @@ class TournamentController extends Controller
             // 🔥 Phân quyền xem giải đấu
             $user = Auth::user();
 
-            // Nếu có tham số my_tournaments=true, chỉ lấy giải của user đang login
+            // Nếu có tham số my_tournaments=true, lấy giải của user (tổ chức + tham gia)
             if ($request->has('my_tournaments') && $request->my_tournaments == 'true') {
-                $query->where('organizer_id', $user->id);
+                // Lấy danh sách team mà user là captain
+                $userTeamIds = \App\Models\Team::where('captain_user_id', $user->id)->pluck('id');
+                
+                // Lấy danh sách tournament_id mà các team của user đã đăng ký
+                $participatingTournamentIds = \App\Models\TournamentRegistration::whereIn('team_id', $userTeamIds)
+                    ->pluck('tournament_id')
+                    ->unique();
+
+                // Lấy giải user tổ chức HOẶC giải user tham gia
+                $query->where(function($q) use ($user, $participatingTournamentIds) {
+                    $q->where('organizer_id', $user->id)  // Giải tổ chức
+                      ->orWhereIn('id', $participatingTournamentIds); // Giải tham gia
+                });
             }
             // Nếu không có tham số my_tournaments → Phân quyền theo role
             else {
@@ -49,6 +62,31 @@ class TournamentController extends Controller
             }
 
             $tournaments = $query->orderBy('created_at', 'desc')->paginate(10);
+
+            // 🎯 Thêm participation_type cho từng giải (nếu my_tournaments=true)
+            if ($request->has('my_tournaments') && $request->my_tournaments == 'true') {
+                $userTeamIds = \App\Models\Team::where('captain_user_id', $user->id)->pluck('id');
+                $participatingTournamentIds = \App\Models\TournamentRegistration::whereIn('team_id', $userTeamIds)
+                    ->pluck('tournament_id')
+                    ->unique()
+                    ->toArray();
+
+                $tournaments->getCollection()->transform(function ($tournament) use ($user, $participatingTournamentIds) {
+                    $isOrganizer = $tournament->organizer_id === $user->id;
+                    $isParticipant = in_array($tournament->id, $participatingTournamentIds);
+
+                    // Xác định loại tham gia
+                    if ($isOrganizer && $isParticipant) {
+                        $tournament->participation_type = 'both'; // Vừa tổ chức vừa tham gia
+                    } elseif ($isOrganizer) {
+                        $tournament->participation_type = 'organizer'; // Chỉ tổ chức
+                    } else {
+                        $tournament->participation_type = 'participant'; // Chỉ tham gia
+                    }
+
+                    return $tournament;
+                });
+            }
 
             return ApiResponse::success('Danh sách giải đấu', $tournaments);
         } catch (\Exception $e) {
@@ -647,12 +685,15 @@ class TournamentController extends Controller
     public function generateSchedule(Request $request, string $id)
     {
         try {
+            // Load tournament với eager loading teams properly
             $tournament = Tournament::with([
                 'registrations' => function ($q) {
-                    $q->where('registration_status', 'approved')->with('team');
-                }
+                    $q->where('registration_status', 'approved');
+                },
+                'registrations.team' // Eager load team relationship
             ])->findOrFail($id);
 
+            
             $user = Auth::user();
             if ($tournament->organizer_id !== $user->id) {
                 return ApiResponse::error('Chỉ người tổ chức giải mới có quyền tạo lịch thi đấu', null, 403);
@@ -668,7 +709,7 @@ class TournamentController extends Controller
                     400
                 );
             }
-
+            
             $validated = $request->validate([
                 'start_date'         => 'required|date',
                 'time_slots'         => 'nullable|array|min:1',
@@ -676,11 +717,18 @@ class TournamentController extends Controller
                 'field_ids'          => 'nullable|array',
                 'field_ids.*'        => 'exists:fields,id',
                 'num_groups'         => 'nullable|integer|min:2|max:8',
+                'teams_per_group'    => 'nullable|integer|min:2|max:16',
                 'days_between_rounds'=> 'nullable|integer|min:1|max:30',
+                'create_third_place_match' => 'nullable|boolean',
+                'shuffle_teams'      => 'nullable|boolean',
+                'auto_fill_third_place' => 'nullable|boolean',
             ]);
 
             // Lấy danh sách đội đã approved
-            $teams = $tournament->registrations->pluck('team')->filter()->values();
+            $teams = $tournament->registrations
+                ->filter(fn($registration) => $registration->team !== null)
+                ->map(fn($registration) => $registration->team)
+                ->values();
 
             if ($teams->count() < 2) {
                 return ApiResponse::error('Cần ít nhất 2 đội đã được duyệt để tạo lịch', null, 400);
@@ -698,7 +746,7 @@ class TournamentController extends Controller
 
             // Lấy field_ids từ bookings (nếu không truyền vào)
             $fieldIds = $validated['field_ids'] ?? $bookings->pluck('field_id')->unique()->values()->toArray();
-
+           
             if (empty($fieldIds)) {
                 return ApiResponse::error('Không có sân nào để tạo lịch', null, 400);
             }
@@ -713,15 +761,54 @@ class TournamentController extends Controller
             $startDate        = Carbon::parse($validated['start_date']);
             $daysBetweenRounds = (int) ($validated['days_between_rounds'] ?? 3);
             $numGroups        = (int) ($validated['num_groups'] ?? 2);
-
+            $teamsPerGroup    = isset($validated['teams_per_group']) ? (int)$validated['teams_per_group'] : null;
+            
+            // New options
+            $createThirdPlaceMatch = (bool) ($validated['create_third_place_match'] ?? false);
+            $shuffleTeams = (bool) ($validated['shuffle_teams'] ?? true);
+            $autoFillThirdPlace = (bool) ($validated['auto_fill_third_place'] ?? true);
+            
             DB::beginTransaction();
+            
             try {
+                // Use service for schedule generation
+                $scheduleService = new TournamentScheduleService();
+                
                 $result = match ($tournament->format) {
-                    'knockout'       => $this->generateKnockout($tournament, $teams, $startDate, $timeSlots, $fieldIds, $daysBetweenRounds),
-                    'round_robin'    => $this->generateRoundRobin($tournament, $teams, $startDate, $timeSlots, $fieldIds, $daysBetweenRounds),
-                    'group_knockout' => $this->generateGroupKnockout($tournament, $teams, $startDate, $timeSlots, $fieldIds, $daysBetweenRounds, $numGroups),
+                    'knockout'       => $scheduleService->generateKnockout(
+                        tournament: $tournament,
+                        teams: $teams,
+                        startDate: $startDate,
+                        timeSlots: $timeSlots,
+                        fieldIds: $fieldIds,
+                        daysBetweenRounds: $daysBetweenRounds,
+                        shuffleTeams: $shuffleTeams,
+                        createThirdPlaceMatch: $createThirdPlaceMatch
+                    ),
+                    'round_robin'    => $scheduleService->generateRoundRobin(
+                        tournament: $tournament,
+                        teams: $teams,
+                        startDate: $startDate,
+                        timeSlots: $timeSlots,
+                        fieldIds: $fieldIds,
+                        daysBetweenRounds: $daysBetweenRounds,
+                        shuffleTeams: $shuffleTeams
+                    ),
+                    'group_knockout' => $scheduleService->generateGroupKnockout(
+                        tournament: $tournament,
+                        teams: $teams,
+                        startDate: $startDate,
+                        timeSlots: $timeSlots,
+                        fieldIds: $fieldIds,
+                        daysBetweenRounds: $daysBetweenRounds,
+                        numGroups: $numGroups,
+                        teamsPerGroup: $teamsPerGroup,
+                        shuffleTeams: $shuffleTeams,
+                        createThirdPlaceMatch: $createThirdPlaceMatch,
+                        autoFillThirdPlace: $autoFillThirdPlace
+                    ),
                 };
-
+               
                 $tournament->update(['status' => 'in_progress']);
                 DB::commit();
 
@@ -742,10 +829,12 @@ class TournamentController extends Controller
     public function getBracket(string $id)
     {
         try {
+            // Load tournament với eager loading teams properly
             $tournament = Tournament::with([
                 'registrations' => function ($q) {
-                    $q->where('registration_status', 'approved')->with('team');
-                }
+                    $q->where('registration_status', 'approved');
+                },
+                'registrations.team' // Eager load team relationship
             ])->findOrFail($id);
 
             // ========================================
@@ -768,8 +857,22 @@ class TournamentController extends Controller
             // Nếu đã publish hoặc là người tạo giải → cho phép xem
             // ========================================
 
-            $approvedTeams = $tournament->registrations->pluck('team')->filter()->values()
-                ->map(fn ($t) => ['id' => $t->id, 'name' => $t->name]);
+            // Lấy danh sách đội đã approved
+            $approvedTeams = $tournament->registrations
+                ->map(function ($registration) {
+                    return $registration->team;
+                })
+                ->filter(function ($team) {
+                    return $team !== null;
+                })
+                ->map(function ($team) {
+                    return [
+                        'id' => $team->id,
+                        'name' => $team->name,
+                        'logo' => $team->logo ?? null,
+                    ];
+                })
+                ->values();
 
             $tournamentInfo = $tournament->only(['id', 'name', 'format', 'status', 'start_date', 'end_date', 'field_type', 'schedule_published']);
 
@@ -777,7 +880,7 @@ class TournamentController extends Controller
                 $rounds = \App\Models\TournamentRound::with([
                     'matches' => function ($q) {
                         $q->orderBy('match_number')
-                          ->with(['homeTeam', 'awayTeam', 'winnerTeam', 'field',
+                          ->with(['homeTeam', 'awayTeam', 'winnerTeam', 'field.fieldCluster',
                                   'homeFromMatch', 'awayFromMatch']);
                     }
                 ])
@@ -799,7 +902,7 @@ class TournamentController extends Controller
                         $q->orderBy('ranking')->with('team');
                     },
                     'matches' => function ($q) {
-                        $q->orderBy('match_number')->with(['homeTeam', 'awayTeam', 'winnerTeam', 'field']);
+                        $q->orderBy('match_number')->with(['homeTeam', 'awayTeam', 'winnerTeam', 'field.fieldCluster']);
                     }
                 ])
                 ->where('tournament_id', $id)
@@ -820,7 +923,7 @@ class TournamentController extends Controller
                         $q->orderBy('ranking')->with('team');
                     },
                     'matches' => function ($q) {
-                        $q->orderBy('match_number')->with(['homeTeam', 'awayTeam', 'winnerTeam', 'field']);
+                        $q->orderBy('match_number')->with(['homeTeam', 'awayTeam', 'winnerTeam', 'field.fieldCluster']);
                     }
                 ])
                 ->where('tournament_id', $id)
@@ -830,7 +933,7 @@ class TournamentController extends Controller
                 $knockoutRounds = \App\Models\TournamentRound::with([
                     'matches' => function ($q) {
                         $q->orderBy('match_number')
-                          ->with(['homeTeam', 'awayTeam', 'winnerTeam', 'field',
+                          ->with(['homeTeam', 'awayTeam', 'winnerTeam', 'field.fieldCluster',
                                   'homeFromMatch', 'awayFromMatch']);
                     }
                 ])
@@ -960,425 +1063,10 @@ class TournamentController extends Controller
     }
 
     // ================================================================
-    // PRIVATE — Sinh lịch Loại Trực Tiếp (Knockout)
-    // Yêu cầu số đội là lũy thừa của 2: 2, 4, 8, 16...
+    // OLD PRIVATE METHODS - DEPRECATED
+    // These methods have been moved to TournamentScheduleService
+    // Keeping them for backward compatibility but should not be used
     // ================================================================
-    private function generateKnockout($tournament, $teams, Carbon $startDate, array $timeSlots, array $fieldIds, int $daysBetweenRounds): array
-    {
-        $teamList = $teams->shuffle()->values();
-        $n = $teamList->count();
-
-        // Bắt buộc phải là lũy thừa của 2 để bracket cân đối
-        if ($n < 2 || ($n & ($n - 1)) !== 0) {
-            throw new \Exception(
-                "Số đội ($n) phải là lũy thừa của 2 (2, 4, 8, 16...) cho thể thức loại trực tiếp. " .
-                "Hiện có $n đội đã duyệt."
-            );
-        }
-
-        $numRounds   = (int) log($n, 2);
-        $matchNumber = 1;
-        $roundData   = []; // [$r => ['round' => ..., 'matches' => [...]]]
-
-        // Tên vòng đấu tính từ cuối (vòng cuối = chung kết)
-        $typesFromEnd = ['final', 'semi_final', 'quarter_final', 'round_of_16', 'round_of_32'];
-
-        for ($r = 0; $r < $numRounds; $r++) {
-            $matchesInRound = $n / (int) pow(2, $r + 1);
-            $indexFromEnd   = $numRounds - 1 - $r;
-            $roundType      = $typesFromEnd[min($indexFromEnd, count($typesFromEnd) - 1)];
-            $roundName      = $this->getRoundNameForType($roundType);
-            $roundStartDate = $startDate->copy()->addDays($r * $daysBetweenRounds);
-
-            $round = \App\Models\TournamentRound::create([
-                'tournament_id' => $tournament->id,
-                'round_name'    => $roundName,
-                'round_type'    => $roundType,
-                'round_order'   => $r + 1,
-                'start_date'    => $roundStartDate,
-                'end_date'      => $roundStartDate->copy()->addDays(max(0, $daysBetweenRounds - 1)),
-                'is_knockout'   => true,
-            ]);
-
-            $roundData[$r] = ['round' => $round, 'matches' => []];
-
-            $slotIdx         = 0;
-            $fieldIdx        = 0;
-            $currentMatchDate = $roundStartDate->copy();
-
-            for ($m = 0; $m < $matchesInRound; $m++) {
-                $matchData = [
-                    'tournament_id'      => $tournament->id,
-                    'tournament_round_id'=> $round->id,
-                    'field_id'           => $fieldIds[$fieldIdx % count($fieldIds)],
-                    'match_date'         => $currentMatchDate->toDateString(),
-                    'match_time'         => $timeSlots[$slotIdx % count($timeSlots)],
-                    'match_number'       => $matchNumber++,
-                    'status'             => 'scheduled',
-                ];
-
-                if ($r === 0) {
-                    // Vòng đầu: gán đội thực vào
-                    $matchData['home_team_id'] = $teamList[$m * 2]->id;
-                    $matchData['away_team_id'] = $teamList[$m * 2 + 1]->id;
-                } else {
-                    // Vòng tiếp theo: TBD, liên kết tới trận vòng trước
-                    $prevMatches = $roundData[$r - 1]['matches'];
-                    $matchData['home_team_id']      = null;
-                    $matchData['away_team_id']      = null;
-                    $matchData['home_from_match_id']= $prevMatches[$m * 2]->id;
-                    $matchData['away_from_match_id']= $prevMatches[$m * 2 + 1]->id;
-                    $matchData['home_from_position']= 'Thắng trận ' . $prevMatches[$m * 2]->match_number;
-                    $matchData['away_from_position']= 'Thắng trận ' . $prevMatches[$m * 2 + 1]->match_number;
-                }
-
-                $match = \App\Models\TournamentMatch::create($matchData);
-                $roundData[$r]['matches'][] = $match;
-
-                $slotIdx++;
-                if ($slotIdx >= count($timeSlots)) {
-                    $slotIdx = 0;
-                    $currentMatchDate->addDay();
-                }
-                $fieldIdx++;
-            }
-        }
-
-        // Tạo trận tranh hạng 3 (chạy song song với chung kết, cùng ngày)
-        if ($numRounds >= 2) {
-            $finalDate        = $startDate->copy()->addDays(($numRounds - 1) * $daysBetweenRounds);
-            $semiFinalMatches = $roundData[$numRounds - 2]['matches']; // Các trận bán kết
-
-            $thirdPlaceRound = \App\Models\TournamentRound::create([
-                'tournament_id' => $tournament->id,
-                'round_name'    => 'Tranh hạng 3',
-                'round_type'    => 'third_place',
-                'round_order'   => $numRounds, // Cùng thứ tự với chung kết
-                'start_date'    => $finalDate,
-                'end_date'      => $finalDate,
-                'is_knockout'   => true,
-            ]);
-
-            \App\Models\TournamentMatch::create([
-                'tournament_id'       => $tournament->id,
-                'tournament_round_id' => $thirdPlaceRound->id,
-                'home_team_id'        => null,
-                'away_team_id'        => null,
-                'home_from_position'  => isset($semiFinalMatches[0])
-                    ? 'Thua trận ' . $semiFinalMatches[0]->match_number
-                    : 'Thua bán kết 1',
-                'away_from_position'  => isset($semiFinalMatches[1])
-                    ? 'Thua trận ' . $semiFinalMatches[1]->match_number
-                    : 'Thua bán kết 2',
-                'field_id'            => $fieldIds[0],
-                'match_date'          => $finalDate->toDateString(),
-                'match_time'          => $timeSlots[count($timeSlots) > 1 ? 1 : 0],
-                'match_number'        => $matchNumber,
-                'status'              => 'scheduled',
-            ]);
-        }
-
-        $totalMatches = array_sum(array_map(fn ($rd) => count($rd['matches']), $roundData));
-        $totalMatches += ($numRounds >= 2 ? 1 : 0); // +1 trận hạng 3
-
-        return [
-            'format'         => 'knockout',
-            'teams'          => $n,
-            'rounds_created' => $numRounds + ($numRounds >= 2 ? 1 : 0),
-            'matches_created'=> $totalMatches,
-            'note'           => 'Trận Tranh hạng 3 cần gán đội thủ công qua API assign-team sau khi có kết quả bán kết.',
-        ];
-    }
-
-    // ================================================================
-    // PRIVATE — Sinh lịch Vòng Tròn (Round Robin)
-    // Mỗi đội đá với mọi đội còn lại đúng 1 lần
-    // ================================================================
-    private function generateRoundRobin($tournament, $teams, Carbon $startDate, array $timeSlots, array $fieldIds, int $daysBetweenRounds): array
-    {
-        $teamList = $teams->shuffle()->values();
-        $teamIds  = $teamList->pluck('id')->toArray();
-
-        // Tạo bảng group duy nhất để theo dõi standings
-        $group = \App\Models\TournamentGroup::create([
-            'tournament_id' => $tournament->id,
-            'group_name'    => 'Vòng bảng',
-        ]);
-
-        foreach ($teamList as $team) {
-            \App\Models\TournamentGroupStanding::create([
-                'tournament_group_id' => $group->id,
-                'team_id'             => $team->id,
-            ]);
-        }
-
-        $pairings = $this->generateRoundRobinPairings($teamIds);
-        $totalMatchDays = count($pairings);
-
-        $round = \App\Models\TournamentRound::create([
-            'tournament_id' => $tournament->id,
-            'round_name'    => 'Vòng bảng',
-            'round_type'    => 'group_stage',
-            'round_order'   => 1,
-            'start_date'    => $startDate,
-            'end_date'      => $startDate->copy()->addDays($totalMatchDays - 1),
-            'is_knockout'   => false,
-        ]);
-
-        $matchNumber  = 1;
-        $slotIdx      = 0;
-        $fieldIdx     = 0;
-        $currentDate  = $startDate->copy();
-
-        foreach ($pairings as $roundPairs) {
-            foreach ($roundPairs as [$homeId, $awayId]) {
-                if (is_null($homeId) || is_null($awayId)) continue; // bỏ qua bye
-
-                \App\Models\TournamentMatch::create([
-                    'tournament_id'       => $tournament->id,
-                    'tournament_round_id' => $round->id,
-                    'tournament_group_id' => $group->id,
-                    'home_team_id'        => $homeId,
-                    'away_team_id'        => $awayId,
-                    'field_id'            => $fieldIds[$fieldIdx % count($fieldIds)],
-                    'match_date'          => $currentDate->toDateString(),
-                    'match_time'          => $timeSlots[$slotIdx % count($timeSlots)],
-                    'match_number'        => $matchNumber++,
-                    'status'              => 'scheduled',
-                ]);
-
-                $slotIdx++;
-                if ($slotIdx >= count($timeSlots)) {
-                    $slotIdx = 0;
-                    $currentDate->addDay();
-                }
-                $fieldIdx++;
-            }
-        }
-
-        return [
-            'format'         => 'round_robin',
-            'teams'          => count($teamIds),
-            'matches_created'=> $matchNumber - 1,
-        ];
-    }
-
-    // ================================================================
-    // PRIVATE — Sinh lịch Vòng Bảng + Loại Trực Tiếp (Group Knockout)
-    // ================================================================
-    private function generateGroupKnockout($tournament, $teams, Carbon $startDate, array $timeSlots, array $fieldIds, int $daysBetweenRounds, int $numGroups): array
-    {
-        $teamList    = $teams->shuffle()->values();
-        $n           = $teamList->count();
-        $groupLabels = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
-
-        if ($numGroups > count($groupLabels)) {
-            throw new \Exception('Số bảng tối đa là ' . count($groupLabels));
-        }
-
-        // Chia đội vào các bảng theo kiểu round-robin distribution
-        $groups     = [];
-        $groupTeams = array_fill(0, $numGroups, []);
-
-        foreach ($teamList as $i => $team) {
-            $groupTeams[$i % $numGroups][] = $team;
-        }
-
-        // Tạo vòng group stage
-        $groupStageRound = \App\Models\TournamentRound::create([
-            'tournament_id' => $tournament->id,
-            'round_name'    => 'Vòng bảng',
-            'round_type'    => 'group_stage',
-            'round_order'   => 1,
-            'start_date'    => $startDate,
-            'end_date'      => null,
-            'is_knockout'   => false,
-        ]);
-
-        $matchNumber = 1;
-        $slotIdx     = 0;
-        $fieldIdx    = 0;
-        $currentDate = $startDate->copy();
-
-        for ($g = 0; $g < $numGroups; $g++) {
-            $group = \App\Models\TournamentGroup::create([
-                'tournament_id' => $tournament->id,
-                'group_name'    => 'Bảng ' . $groupLabels[$g],
-            ]);
-            $groups[] = $group;
-
-            // Khởi tạo standings
-            foreach ($groupTeams[$g] as $team) {
-                \App\Models\TournamentGroupStanding::create([
-                    'tournament_group_id' => $group->id,
-                    'team_id'             => $team->id,
-                ]);
-            }
-
-            // Sinh lịch vòng tròn nội bộ bảng
-            $teamIdsInGroup = array_map(fn ($t) => $t->id, $groupTeams[$g]);
-            $pairings       = $this->generateRoundRobinPairings($teamIdsInGroup);
-
-            foreach ($pairings as $roundPairs) {
-                foreach ($roundPairs as [$homeId, $awayId]) {
-                    if (is_null($homeId) || is_null($awayId)) continue;
-
-                    \App\Models\TournamentMatch::create([
-                        'tournament_id'       => $tournament->id,
-                        'tournament_round_id' => $groupStageRound->id,
-                        'tournament_group_id' => $group->id,
-                        'home_team_id'        => $homeId,
-                        'away_team_id'        => $awayId,
-                        'field_id'            => $fieldIds[$fieldIdx % count($fieldIds)],
-                        'match_date'          => $currentDate->toDateString(),
-                        'match_time'          => $timeSlots[$slotIdx % count($timeSlots)],
-                        'match_number'        => $matchNumber++,
-                        'status'              => 'scheduled',
-                    ]);
-
-                    $slotIdx++;
-                    if ($slotIdx >= count($timeSlots)) {
-                        $slotIdx = 0;
-                        $currentDate->addDay();
-                    }
-                    $fieldIdx++;
-                }
-            }
-        }
-
-        // Tính ngày bắt đầu vòng knockout (sau khi group stage kết thúc)
-        $knockoutStartDate = $currentDate->copy()->addDays($daysBetweenRounds);
-
-        // Số đội vào vòng knockout = nhất mỗi bảng (mặc định 1 đội/bảng)
-        $teamsAdvancing  = $numGroups; // top 1 mỗi bảng
-        $knockoutSize    = 1;
-        while ($knockoutSize < $teamsAdvancing) $knockoutSize *= 2;
-        $knockoutRounds  = (int) log($knockoutSize, 2);
-
-        $typesFromEnd  = ['final', 'semi_final', 'quarter_final', 'round_of_16', 'round_of_32'];
-        $knockoutRoundData = [];
-
-        for ($r = 0; $r < $knockoutRounds; $r++) {
-            $matchesInRound = $knockoutSize / (int) pow(2, $r + 1);
-            $indexFromEnd   = $knockoutRounds - 1 - $r;
-            $roundType      = $typesFromEnd[min($indexFromEnd, count($typesFromEnd) - 1)];
-            $roundName      = $this->getRoundNameForType($roundType);
-            $roundStartDate = $knockoutStartDate->copy()->addDays($r * $daysBetweenRounds);
-
-            $round = \App\Models\TournamentRound::create([
-                'tournament_id' => $tournament->id,
-                'round_name'    => $roundName,
-                'round_type'    => $roundType,
-                'round_order'   => $r + 2, // +2 vì group_stage là order 1
-                'start_date'    => $roundStartDate,
-                'end_date'      => $roundStartDate->copy()->addDays(max(0, $daysBetweenRounds - 1)),
-                'is_knockout'   => true,
-            ]);
-
-            $knockoutRoundData[$r] = ['round' => $round, 'matches' => []];
-
-            $slotIdx  = 0;
-            $fieldIdx = 0;
-
-            for ($m = 0; $m < $matchesInRound; $m++) {
-                $matchData = [
-                    'tournament_id'       => $tournament->id,
-                    'tournament_round_id' => $round->id,
-                    'home_team_id'        => null,
-                    'away_team_id'        => null,
-                    'field_id'            => $fieldIds[$fieldIdx % count($fieldIds)],
-                    'match_date'          => $roundStartDate->toDateString(),
-                    'match_time'          => $timeSlots[$slotIdx % count($timeSlots)],
-                    'match_number'        => $matchNumber++,
-                    'status'              => 'scheduled',
-                ];
-
-                if ($r === 0) {
-                    // Vòng knockout đầu tiên: đội đến từ kết quả bảng
-                    $homeGroupLabel = $groupLabels[$m * 2 % $numGroups] ?? '?';
-                    $awayGroupLabel = $groupLabels[($m * 2 + 1) % $numGroups] ?? '?';
-                    $matchData['home_from_position'] = 'Nhất bảng ' . $homeGroupLabel;
-                    $matchData['away_from_position'] = 'Nhì bảng ' . $awayGroupLabel;
-                } else {
-                    $prevMatches = $knockoutRoundData[$r - 1]['matches'];
-                    $matchData['home_from_match_id'] = $prevMatches[$m * 2]->id ?? null;
-                    $matchData['away_from_match_id'] = $prevMatches[$m * 2 + 1]->id ?? null;
-                    $matchData['home_from_position'] = isset($prevMatches[$m * 2])
-                        ? 'Thắng trận ' . $prevMatches[$m * 2]->match_number : null;
-                    $matchData['away_from_position'] = isset($prevMatches[$m * 2 + 1])
-                        ? 'Thắng trận ' . $prevMatches[$m * 2 + 1]->match_number : null;
-                }
-
-                $match = \App\Models\TournamentMatch::create($matchData);
-                $knockoutRoundData[$r]['matches'][] = $match;
-
-                $slotIdx++;
-                $fieldIdx++;
-            }
-        }
-
-        $groupMatchCount   = $matchNumber - 1;
-        $knockoutMatchCount = array_sum(array_map(fn ($rd) => count($rd['matches']), $knockoutRoundData));
-
-        return [
-            'format'               => 'group_knockout',
-            'groups_created'       => $numGroups,
-            'group_matches'        => $groupMatchCount,
-            'knockout_rounds'      => $knockoutRounds,
-            'knockout_matches'     => $knockoutMatchCount,
-            'note'                 => 'Sau khi vòng bảng kết thúc, dùng API assign-team để gán đội nhất/nhì bảng vào vòng knockout.',
-        ];
-    }
-
-    // ================================================================
-    // PRIVATE HELPERS
-    // ================================================================
-
-    /**
-     * Sinh danh sách cặp đấu vòng tròn (Berger table / circle method)
-     * Trả về mảng các vòng, mỗi vòng là mảng cặp [homeId, awayId]
-     */
-    private function generateRoundRobinPairings(array $teamIds): array
-    {
-        $n = count($teamIds);
-        if ($n % 2 === 1) {
-            $teamIds[] = null; // bye
-            $n++;
-        }
-
-        $rounds   = [];
-        $fixed    = $teamIds[0];
-        $rotating = array_slice($teamIds, 1);
-        $half     = $n / 2;
-
-        for ($r = 0; $r < $n - 1; $r++) {
-            $round   = [];
-            $round[] = [$fixed, $rotating[$n - 2]]; // fixed đấu với cuối rotating
-
-            for ($i = 0; $i < $half - 1; $i++) {
-                $round[] = [$rotating[$i], $rotating[$n - 2 - $i - 1]];
-            }
-
-            $rounds[] = $round;
-            array_push($rotating, array_shift($rotating)); // Rotate trái 1 bước
-        }
-
-        return $rounds;
-    }
-
-    private function getRoundNameForType(string $type): string
-    {
-        return match ($type) {
-            'round_of_32' => 'Vòng 1/32',
-            'round_of_16' => 'Vòng 1/16',
-            'quarter_final'=> 'Tứ kết',
-            'semi_final'  => 'Bán kết',
-            'final'       => 'Chung kết',
-            'third_place' => 'Tranh hạng 3',
-            'group_stage' => 'Vòng bảng',
-            default       => $type,
-        };
-    }
 
     // ================================================================
     // BOOK FIELDS — Thuê sân cho giải đấu
@@ -2044,6 +1732,156 @@ class TournamentController extends Controller
 
         } catch (\Exception $e) {
             return ApiResponse::error('Xóa file thất bại: ' . $e->getMessage(), null, 500);
+        }
+    }
+
+    // ================================================================
+    // GET GROUPS — Danh sách bảng đấu kèm đội và bảng xếp hạng
+    // GET /tournaments/{id}/groups
+    // ================================================================
+    public function getGroups(string $id)
+    {
+        try {
+            $tournament = Tournament::findOrFail($id);
+
+            $groups = \App\Models\TournamentGroup::with([
+                'standings' => function ($q) {
+                    $q->orderBy('ranking')->with('team');
+                },
+                'teams',
+                'matches' => function ($q) {
+                    $q->orderBy('match_number')
+                      ->with(['homeTeam', 'awayTeam', 'winnerTeam', 'field.fieldCluster']);
+                },
+            ])
+            ->where('tournament_id', $id)
+            ->orderBy('group_name')
+            ->get();
+
+            return ApiResponse::success('Danh sách bảng đấu', [
+                'tournament_id' => $tournament->id,
+                'groups'        => $groups,
+                'total_groups'  => $groups->count(),
+            ]);
+        } catch (\Exception $e) {
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), null, 500);
+        }
+    }
+
+    // ================================================================
+    // GET STANDINGS — Bảng xếp hạng tất cả các bảng đấu
+    // GET /tournaments/{id}/standings
+    // ================================================================
+    public function getStandings(string $id)
+    {
+        try {
+            $tournament = Tournament::findOrFail($id);
+
+            $groups = \App\Models\TournamentGroup::with([
+                'standings' => function ($q) {
+                    $q->orderBy('ranking')->with('team');
+                },
+            ])
+            ->where('tournament_id', $id)
+            ->orderBy('group_name')
+            ->get();
+
+            $standingsData = $groups->map(function ($group) {
+                return [
+                    'group_id'   => $group->id,
+                    'group_name' => $group->group_name,
+                    'standings'  => $group->standings,
+                ];
+            });
+
+            return ApiResponse::success('Bảng xếp hạng giải đấu', [
+                'tournament_id' => $tournament->id,
+                'format'        => $tournament->format,
+                'groups'        => $standingsData,
+            ]);
+        } catch (\Exception $e) {
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), null, 500);
+        }
+    }
+
+    // ================================================================
+    // GET MATCHES — Tất cả trận đấu của một giải
+    // GET /tournaments/{id}/matches
+    // ================================================================
+    public function getMatches(string $id)
+    {
+        try {
+            $tournament = Tournament::findOrFail($id);
+
+            $matches = \App\Models\TournamentMatch::with([
+                'homeTeam',
+                'awayTeam',
+                'winnerTeam',
+                'field.fieldCluster',
+                'round',
+                'group',
+            ])
+            ->where('tournament_id', $id)
+            ->orderBy('match_date')
+            ->orderBy('match_time')
+            ->orderBy('match_number')
+            ->get();
+
+            // Group by round for convenience
+            $byRound = $matches->groupBy('tournament_round_id')->map(function ($roundMatches) {
+                $firstMatch = $roundMatches->first();
+                return [
+                    'round_id'   => $firstMatch->tournament_round_id,
+                    'round_name' => optional($firstMatch->round)->round_name,
+                    'round_type' => optional($firstMatch->round)->round_type,
+                    'matches'    => $roundMatches->values(),
+                ];
+            })->values();
+
+            return ApiResponse::success('Danh sách trận đấu', [
+                'tournament_id'  => $tournament->id,
+                'total_matches'  => $matches->count(),
+                'rounds'         => $byRound,
+            ]);
+        } catch (\Exception $e) {
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), null, 500);
+        }
+    }
+
+    // ================================================================
+    // GET TEAM MATCHES — Các trận đấu của một đội trong giải
+    // GET /tournaments/{id}/teams/{teamId}/matches
+    // ================================================================
+    public function getTeamMatches(string $tournamentId, string $teamId)
+    {
+        try {
+            $tournament = Tournament::findOrFail($tournamentId);
+
+            $matches = \App\Models\TournamentMatch::with([
+                'homeTeam',
+                'awayTeam',
+                'winnerTeam',
+                'field.fieldCluster',
+                'round',
+                'group',
+            ])
+            ->where('tournament_id', $tournamentId)
+            ->where(function ($q) use ($teamId) {
+                $q->where('home_team_id', $teamId)
+                  ->orWhere('away_team_id', $teamId);
+            })
+            ->orderBy('match_date')
+            ->orderBy('match_time')
+            ->get();
+
+            return ApiResponse::success('Trận đấu của đội trong giải', [
+                'tournament_id' => $tournament->id,
+                'team_id'       => (int) $teamId,
+                'total_matches' => $matches->count(),
+                'matches'       => $matches,
+            ]);
+        } catch (\Exception $e) {
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), null, 500);
         }
     }
 }

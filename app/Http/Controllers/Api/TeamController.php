@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Team;
 use App\Models\TeamMember;
+use App\Models\TournamentMatch;
 use App\Helpers\ApiResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -138,6 +139,82 @@ class TeamController extends Controller
             return ApiResponse::success('Xóa đội thành công', null);
         } catch (\Exception $e) {
             return ApiResponse::error('Lỗi: ' . $e->getMessage(), 500);
+        }
+    }
+
+    /**
+     * GET /teams/{teamId}/tournaments
+     * Tất cả giải đấu mà đội đã đăng ký (với trạng thái đăng ký).
+     */
+    public function getTournaments(string $teamId)
+    {
+        try {
+            $team = Team::findOrFail($teamId);
+
+            $registrations = \App\Models\TournamentRegistration::with([
+                'tournament' => function ($q) {
+                    $q->with(['fieldCluster', 'organizer']);
+                },
+            ])
+            ->where('team_id', $teamId)
+            ->orderByDesc('created_at')
+            ->get();
+
+            $tournaments = $registrations->map(function ($reg) {
+                $t = $reg->tournament;
+                if (!$t) return null;
+                return array_merge($t->toArray(), [
+                    'registration_status' => $reg->registration_status,
+                    'registration_id'     => $reg->id,
+                    'registration_date'   => $reg->registration_date,
+                ]);
+            })->filter()->values();
+
+            return ApiResponse::success('Giải đấu của đội', [
+                'team_id'    => (int) $teamId,
+                'team_name'  => $team->name,
+                'total'      => $tournaments->count(),
+                'tournaments'=> $tournaments,
+            ]);
+        } catch (\Exception $e) {
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), null, 500);
+        }
+    }
+
+    /**
+     * GET /teams/{teamId}/upcoming-matches
+     * Các trận đấu chưa hoàn thành (scheduled/ongoing) của đội, sắp xếp theo ngày.
+     */
+    public function getUpcomingMatches(string $teamId)
+    {
+        try {
+            $team = Team::findOrFail($teamId);
+
+            $matches = TournamentMatch::with([
+                'tournament',
+                'homeTeam',
+                'awayTeam',
+                'field',
+                'round',
+                'group',
+            ])
+            ->where(function ($q) use ($teamId) {
+                $q->where('home_team_id', $teamId)
+                  ->orWhere('away_team_id', $teamId);
+            })
+            ->whereIn('status', ['scheduled', 'ongoing'])
+            ->orderBy('match_date')
+            ->orderBy('match_time')
+            ->get();
+
+            return ApiResponse::success('Trận sắp thi đấu', [
+                'team_id'       => (int) $teamId,
+                'team_name'     => $team->name,
+                'total_matches' => $matches->count(),
+                'matches'       => $matches,
+            ]);
+        } catch (\Exception $e) {
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), null, 500);
         }
     }
 }

@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class TournamentGroup extends Model
@@ -27,5 +28,12 @@ class TournamentGroup extends Model
     public function matches(): HasMany
     {
         return $this->hasMany(TournamentMatch::class, 'tournament_group_id');
+    }
+
+    public function teams(): BelongsToMany
+    {
+        return $this->belongsToMany(Team::class, 'tournament_group_teams')
+                    ->withPivot('seed_number')
+                    ->withTimestamps();
     }
 }

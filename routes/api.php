@@ -58,8 +58,8 @@ Route::prefix('public')->group(function () {
     Route::get('field-hourly-prices/{id}', [FieldHourlyPriceController::class, 'publicShow']);
 
     // 🔥 Giải đấu công khai (prefix 'public' để tránh conflict với authenticated routes)
-    Route::get('public/tournaments', [TournamentController::class, 'publicIndex']);
-    Route::get('public/tournaments/{id}', [TournamentController::class, 'publicShow']);
+    Route::get('tournaments', [TournamentController::class, 'publicIndex']);
+    Route::get('tournaments/{id}', [TournamentController::class, 'publicShow']);
 
     // Xem lịch thi đấu/bracket (có logic kiểm tra quyền bên trong controller)
     Route::get('tournaments/{id}/bracket', [TournamentController::class, 'getBracket']);
@@ -301,8 +301,14 @@ Route::middleware('jwt.auth')->group(function () {
 
     // Routes đặc biệt cho trận đấu
     Route::put('tournament-matches/{id}/update-score', [TournamentMatchController::class, 'updateScore']);
+    // Alias endpoint với tên ngữ nghĩa hơn
+    Route::put('tournament-matches/{id}/result', [TournamentMatchController::class, 'result']);
     // Kéo thả gán đội vào slot home/away (FE drag & drop)
     Route::patch('tournament-matches/{id}/assign-team', [TournamentMatchController::class, 'assignTeam']);
+    // Đổi sân thi đấu
+    Route::patch('tournament-matches/{id}/field', [TournamentMatchController::class, 'updateField']);
+    // Đổi lịch thi đấu (ngày giờ)
+    Route::patch('tournament-matches/{id}/schedule', [TournamentMatchController::class, 'updateSchedule']);
 
     // ==========================================
     // Tournament Round (Vòng đấu) - quản lý thủ công
@@ -313,4 +319,23 @@ Route::middleware('jwt.auth')->group(function () {
     // Tournament Group (Bảng đấu) - quản lý thủ công
     // ==========================================
     Route::apiResource('tournament-groups', TournamentGroupController::class)->except(['update']);
+
 });
+
+// ==========================================
+// ROUTES PUBLIC — xem sơ đồ / lịch thi đấu (không cần đăng nhập)
+// ==========================================
+// GET /tournaments/{id}/groups — bảng đấu + đội + xếp hạng
+
+
+Route::get('tournaments/{id}/groups', [TournamentController::class, 'getGroups']);
+// GET /tournaments/{id}/standings — bảng xếp hạng tất cả bảng
+Route::get('tournaments/{id}/standings', [TournamentController::class, 'getStandings']);
+// GET /tournaments/{id}/matches — tất cả trận đấu
+Route::get('tournaments/{id}/matches', [TournamentController::class, 'getMatches']);
+// GET /tournaments/{id}/teams/{teamId}/matches — trận của 1 đội trong giải
+Route::get('tournaments/{id}/teams/{teamId}/matches', [TournamentController::class, 'getTeamMatches']);
+// GET /teams/{teamId}/tournaments — tất cả giải đấu đội đó đăng ký
+Route::get('teams/{teamId}/tournaments', [TeamController::class, 'getTournaments']);
+// GET /teams/{teamId}/upcoming-matches — các trận sắp tới của đội
+Route::get('teams/{teamId}/upcoming-matches', [TeamController::class, 'getUpcomingMatches']);

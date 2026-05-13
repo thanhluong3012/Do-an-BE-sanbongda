@@ -58,7 +58,7 @@ class TournamentRegistrationController extends Controller
                 $query->whereIn('team_id', $teamIds);
             }
 
-            $registrations = $query->orderBy('created_at', 'desc')->paginate(10);
+            $registrations = $query->orderBy('created_at', 'desc')->get();
 
             return ApiResponse::success('Danh sách đăng ký', $registrations);
         } catch (\Exception $e) {
@@ -575,4 +575,3 @@ class TournamentRegistrationController extends Controller
         }
     }
 }
-

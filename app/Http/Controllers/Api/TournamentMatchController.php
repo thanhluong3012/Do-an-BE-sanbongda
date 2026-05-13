@@ -7,6 +7,7 @@ use App\Models\TournamentMatch;
 use App\Models\TournamentRegistration;
 use App\Models\TournamentGroupStanding;
 use App\Helpers\ApiResponse;
+use App\Services\Tournament\TournamentStandingService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -17,7 +18,7 @@ class TournamentMatchController extends Controller
     public function index(Request $request)
     {
         try {
-            $query = TournamentMatch::with(['tournament', 'homeTeam', 'awayTeam', 'field', 'round']);
+            $query = TournamentMatch::with(['tournament', 'homeTeam', 'awayTeam', 'field.fieldCluster', 'round']);
 
             if ($request->has('tournament_id')) {
                 $query->where('tournament_id', $request->tournament_id);
@@ -58,7 +59,7 @@ class TournamentMatchController extends Controller
             $match = TournamentMatch::create($validated);
 
             return ApiResponse::success('Tạo trận đấu thành công',
-                $match->load(['tournament', 'homeTeam', 'awayTeam', 'field']), 201);
+                $match->load(['tournament', 'homeTeam', 'awayTeam', 'field.fieldCluster']), 201);
         } catch (\Exception $e) {
             return ApiResponse::error('Lỗi: ' . $e->getMessage(), 500);
         }
@@ -72,7 +73,7 @@ class TournamentMatchController extends Controller
                 'tournament',
                 'homeTeam',
                 'awayTeam',
-                'field',
+                'field.fieldCluster',
                 'round',
                 'group'
             ])->findOrFail($id);
@@ -83,11 +84,20 @@ class TournamentMatchController extends Controller
         }
     }
 
+    /**
+     * Alias of updateScore — PUT /tournament-matches/{id}/result
+     * Provided so FE can use a more semantic endpoint name.
+     */
+    public function result(Request $request, string $id)
+    {
+        return $this->updateScore($request, $id);
+    }
+
     // Cập nhật tỷ số trận đấu
     public function updateScore(Request $request, string $id)
     {
         try {
-            $match = TournamentMatch::with(['tournament', 'group'])->findOrFail($id);
+            $match = TournamentMatch::with(['tournament', 'group', 'round'])->findOrFail($id);
 
             // Chỉ organizer của giải mới được nhập tỷ số
             $user = Auth::user();
@@ -152,88 +162,71 @@ class TournamentMatchController extends Controller
         }
     }
 
-    // Tự động cập nhật bảng xếp hạng
+    // Tự động cập nhật bảng xếp hạng — tính lại từ đầu, tránh double-count
     private function updateGroupStandings($match)
     {
-        $homeStanding = TournamentGroupStanding::firstOrCreate([
-            'tournament_group_id' => $match->tournament_group_id,
-            'team_id' => $match->home_team_id,
-        ]);
-
-        $awayStanding = TournamentGroupStanding::firstOrCreate([
-            'tournament_group_id' => $match->tournament_group_id,
-            'team_id' => $match->away_team_id,
-        ]);
-
-        // Update home team
-        $homeStanding->matches_played += 1;
-        $homeStanding->goals_for += $match->home_score;
-        $homeStanding->goals_against += $match->away_score;
-        $homeStanding->goal_difference = $homeStanding->goals_for - $homeStanding->goals_against;
-
-        // Update away team
-        $awayStanding->matches_played += 1;
-        $awayStanding->goals_for += $match->away_score;
-        $awayStanding->goals_against += $match->home_score;
-        $awayStanding->goal_difference = $awayStanding->goals_for - $awayStanding->goals_against;
-
-        if ($match->home_score > $match->away_score) {
-            // Home wins
-            $homeStanding->wins += 1;
-            $homeStanding->points += 3;
-            $awayStanding->losses += 1;
-        } elseif ($match->away_score > $match->home_score) {
-            // Away wins
-            $awayStanding->wins += 1;
-            $awayStanding->points += 3;
-            $homeStanding->losses += 1;
-        } else {
-            // Draw
-            $homeStanding->draws += 1;
-            $homeStanding->points += 1;
-            $awayStanding->draws += 1;
-            $awayStanding->points += 1;
-        }
-
-        $homeStanding->save();
-        $awayStanding->save();
-
-        // Update rankings
-        $this->updateGroupRankings($match->tournament_group_id);
+        (new TournamentStandingService())->recalculate($match->tournament_group_id);
     }
 
-    // Cập nhật thứ hạng trong bảng
+    // Cập nhật thứ hạng trong bảng (kept for backward-compat, now a no-op since service handles it)
     private function updateGroupRankings($groupId)
     {
-        $standings = TournamentGroupStanding::where('tournament_group_id', $groupId)
-            ->orderBy('points', 'desc')
-            ->orderBy('goal_difference', 'desc')
-            ->orderBy('goals_for', 'desc')
-            ->get();
-
-        foreach ($standings as $index => $standing) {
-            $standing->ranking = $index + 1;
-            $standing->save();
-        }
+        // Rankings are now handled inside TournamentStandingService::recalculate()
     }
 
     // Cập nhật trận tiếp theo trong knockout
     private function updateNextMatch($currentMatch, $winnerId)
     {
-        // Tìm trận đấu tiếp theo cần đội thắng này
-        $nextMatches = TournamentMatch::where(function($query) use ($currentMatch) {
-            $query->where('home_from_match_id', $currentMatch->id)
-                  ->orWhere('away_from_match_id', $currentMatch->id);
-        })->get();
+        // Tìm đội thua (cho trận tranh hạng 3)
+        $loserId = null;
+        if ($currentMatch->home_team_id && $currentMatch->away_team_id) {
+            $loserId = ($winnerId == $currentMatch->home_team_id) 
+                ? $currentMatch->away_team_id 
+                : $currentMatch->home_team_id;
+        }
+
+        // Tìm trận đấu tiếp theo cần đội thắng/thua này
+        $nextMatches = TournamentMatch::with('round')
+            ->where(function($query) use ($currentMatch) {
+                $query->where('home_from_match_id', $currentMatch->id)
+                      ->orWhere('away_from_match_id', $currentMatch->id);
+            })->get();
+
+        \Log::info('Updating next matches after match completion', [
+            'current_match_id' => $currentMatch->id,
+            'winner_id' => $winnerId,
+            'loser_id' => $loserId,
+            'next_matches_count' => $nextMatches->count(),
+        ]);
 
         foreach ($nextMatches as $nextMatch) {
+            $updated = false;
+            
+            // Check nếu là trận tranh hạng 3 → fill đội thua
+            $isThirdPlaceMatch = ($nextMatch->bracket_position === 'third_place') 
+                || ($nextMatch->round && $nextMatch->round->round_type === 'third_place');
+            
+            $teamToAdvance = $isThirdPlaceMatch ? $loserId : $winnerId;
+            
             if ($nextMatch->home_from_match_id == $currentMatch->id) {
-                $nextMatch->home_team_id = $winnerId;
+                $nextMatch->home_team_id = $teamToAdvance;
+                $updated = true;
             }
             if ($nextMatch->away_from_match_id == $currentMatch->id) {
-                $nextMatch->away_team_id = $winnerId;
+                $nextMatch->away_team_id = $teamToAdvance;
+                $updated = true;
             }
-            $nextMatch->save();
+            
+            if ($updated) {
+                $nextMatch->save();
+                \Log::info('Updated next match team', [
+                    'next_match_id' => $nextMatch->id,
+                    'is_third_place' => $isThirdPlaceMatch,
+                    'team_advanced' => $teamToAdvance,
+                    'home_team_id' => $nextMatch->home_team_id,
+                    'away_team_id' => $nextMatch->away_team_id,
+                ]);
+            }
         }
     }
 
@@ -324,6 +317,80 @@ class TournamentMatchController extends Controller
 
             return ApiResponse::success(
                 'Gán đội vào trận thành công',
+                $match->fresh()->load(['homeTeam', 'awayTeam', 'field', 'round'])
+            );
+        } catch (\Exception $e) {
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), 500);
+        }
+    }
+
+    /**
+     * Cập nhật sân thi đấu của trận
+     * PATCH /tournament-matches/{id}/field
+     * Body: { "field_id": 3 }
+     */
+    public function updateField(Request $request, string $id)
+    {
+        try {
+            $match = TournamentMatch::with('tournament')->findOrFail($id);
+
+            // Không cho đổi sân nếu trận đã đá
+            if (in_array($match->status, ['completed', 'ongoing'])) {
+                return ApiResponse::error('Không thể thay đổi sân trong trận đang diễn ra hoặc đã kết thúc', null, 400);
+            }
+
+            $user = Auth::user();
+            if ($match->tournament->organizer_id !== $user->id) {
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền đổi sân', null, 403);
+            }
+
+            $validated = $request->validate([
+                'field_id' => 'required|exists:fields,id',
+            ]);
+
+            $match->field_id = $validated['field_id'];
+            $match->save();
+
+            return ApiResponse::success(
+                'Cập nhật sân thi đấu thành công',
+                $match->fresh()->load(['homeTeam', 'awayTeam', 'field', 'round'])
+            );
+        } catch (\Exception $e) {
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), 500);
+        }
+    }
+
+    /**
+     * Cập nhật ngày giờ thi đấu
+     * PATCH /tournament-matches/{id}/schedule
+     * Body: { "match_date": "2026-06-15", "match_time": "14:00" }
+     */
+    public function updateSchedule(Request $request, string $id)
+    {
+        try {
+            $match = TournamentMatch::with('tournament')->findOrFail($id);
+
+            // Không cho đổi lịch nếu trận đã đá
+            if (in_array($match->status, ['completed', 'ongoing'])) {
+                return ApiResponse::error('Không thể thay đổi lịch trong trận đang diễn ra hoặc đã kết thúc', null, 400);
+            }
+
+            $user = Auth::user();
+            if ($match->tournament->organizer_id !== $user->id) {
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền đổi lịch', null, 403);
+            }
+
+            $validated = $request->validate([
+                'match_date' => 'required|date',
+                'match_time' => 'required|date_format:H:i',
+            ]);
+
+            $match->match_date = $validated['match_date'];
+            $match->match_time = $validated['match_time'];
+            $match->save();
+
+            return ApiResponse::success(
+                'Cập nhật lịch thi đấu thành công',
                 $match->fresh()->load(['homeTeam', 'awayTeam', 'field', 'round'])
             );
         } catch (\Exception $e) {

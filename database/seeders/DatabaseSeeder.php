@@ -15,17 +15,14 @@ class DatabaseSeeder extends Seeder
      */
     public function run(): void
     {
-        // Chạy RoleSeeder trước, sau đó AdminSeeder, OwnerSeeder, StaffSeeder
+        // Chạy RoleSeeder trước để đảm bảo có các role cần thiết
         $this->call([
             RoleSeeder::class,
-            AdminSeeder::class,
-            OwnerSeeder::class,
-            StaffSeeder::class,
-            CustomerSeeder::class,
-            FieldClusterSeeder::class,
-            FieldSeeder::class,
-            FieldHourlyPriceSeeder::class,
-            BookSeeder::class,
+        ]);
+
+        // Chạy ComprehensiveSeeder - Seed toàn bộ dữ liệu demo
+        $this->call([
+            ComprehensiveSeeder::class,
         ]);
 
         // User::factory(10)->create();
