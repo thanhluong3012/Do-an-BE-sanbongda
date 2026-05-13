@@ -6,6 +6,7 @@ use App\Helpers\ApiResponse;
 use App\Http\Controllers\Controller;
 use App\Models\Book;
 use App\Models\Field;
+use App\Models\FieldHourlyPrice;
 use App\Models\Notification;
 use App\Models\Tournament;
 use Exception;
@@ -103,15 +104,15 @@ class BookController extends Controller
                 'day_book' => ['required', 'date', 'after_or_equal:today'],
                 'start_time' => ['required', 'date_format:H:i:s'],
                 'end_time' => ['required', 'date_format:H:i:s', 'after:start_time'],
-                'total_price' => ['required', 'numeric', 'min:0'],
-                'payment_method' => ['required', 'in:cash,transfer'],
+                'total_price' => ['nullable', 'numeric', 'min:0'],
+                'payment_method' => ['required', 'string', 'in:cash,transfer'], // User chọn phương thức thanh toán
             ]);
 
             if ($validator->fails()) {
                 return ApiResponse::error('Validation failed', $validator->errors(), 422);
             }
 
-            $field = Field::find($request->field_id);
+            $field = Field::with('fieldCluster')->find($request->field_id);
 
             if (!$field) {
                 return ApiResponse::error('Không tìm thấy sân', null, 404);
@@ -123,10 +124,10 @@ class BookController extends Controller
             }
 
             // Kiểm tra trùng lịch (bao gồm cả tournament bookings và regular bookings)
-            // 🔥 CHỈ kiểm tra booking đang active (pending/confirmed), bỏ qua booking đã cancelled
+            // 🔥 CHỈ kiểm tra booking đang active (pending_confirmation, confirmed, completed), bỏ qua booking rejected/cancelled
             $conflictBooking = Book::where('field_id', $request->field_id)
                 ->where('day_book', $request->day_book)
-                ->whereIn('status', ['pending', 'confirmed'])
+                ->whereIn('status', ['pending_confirmation', 'confirmed', 'completed'])
                 ->where(function ($query) use ($request) {
                     $query->whereBetween('start_time', [$request->start_time, $request->end_time])
                         ->orWhereBetween('end_time', [$request->start_time, $request->end_time])
@@ -141,86 +142,155 @@ class BookController extends Controller
                 return ApiResponse::error('Khung giờ này đã được đặt', null, 400);
             }
 
+            // 🔥 TỰ ĐỘNG TÍNH GIÁ TỪ FIELD_HOURLY_PRICES
+            // 1. Xác định day_type (weekday/weekend)
+            $dayOfWeek = date('N', strtotime($request->day_book)); // 1=Monday, 7=Sunday
+            $dayType = ($dayOfWeek >= 6) ? 'weekend' : 'weekday';
+
+            // 2. Query giá từ database
+            $priceConfig = FieldHourlyPrice::where('field_cluster_id', $field->field_cluster_id)
+                ->where('field_type', $field->field_type)
+                ->where('day_type', $dayType)
+                ->first();
+
+            // 3. Kiểm tra owner đã cấu hình giá chưa
+            if (!$priceConfig) {
+                return ApiResponse::errorWithData(
+                    "Chưa cấu hình giá cho sân {$field->field_type} vào " .
+                    ($dayType === 'weekend' ? 'cuối tuần' : 'ngày thường') .
+                    ". Vui lòng liên hệ chủ sân hoặc chọn sân/ngày khác.",
+                    [
+                        'missing_price_config' => true,
+                        'field_type' => $field->field_type,
+                        'day_type' => $dayType,
+                        'field_cluster_name' => $field->fieldCluster->name,
+                        'contact_phone' => $field->fieldCluster->phone,
+                    ],
+                    400
+                );
+            }
+
+            // 4. Tính giá tự động
+            $startTime = new \DateTime($request->start_time);
+            $endTime = new \DateTime($request->end_time);
+            $hours = ($endTime->getTimestamp() - $startTime->getTimestamp()) / 3600;
+            $calculatedPrice = round($priceConfig->price_hour * $hours, 2);
+
+            // 5. Validate nếu FE gửi total_price (để phát hiện price change giữa lúc FE load và submit)
+            if ($request->filled('total_price')) {
+                $tolerance = 0.01; // Cho phép sai số 0.01đ do làm tròn
+                if (abs($request->total_price - $calculatedPrice) > $tolerance) {
+                    return ApiResponse::errorWithData(
+                        'Giá không khớp với hệ thống. Có thể chủ sân vừa thay đổi giá. Vui lòng tải lại trang.',
+                        [
+                            'price_mismatch' => true,
+                            'expected_price' => $calculatedPrice,
+                            'received_price' => $request->total_price,
+                            'price_hour' => $priceConfig->price_hour,
+                            'hours' => $hours,
+                        ],
+                        400
+                    );
+                }
+            }
+
+            Log::info('💰 [BOOKING] Auto-calculated price', [
+                'field_id' => $field->id,
+                'field_type' => $field->field_type,
+                'day_type' => $dayType,
+                'price_hour' => $priceConfig->price_hour,
+                'hours' => $hours,
+                'total_price' => $calculatedPrice,
+            ]);
+
             $book = Book::create([
                 'user_id' => $currentUser->id,
-                'booking_type' => 'regular',
-                'status' => 'pending',  // 🔥 Trạng thái booking
+                'booking_type' => 'regular', // 🔥 CHỜ OWNER XÁC NHẬN ĐẶT SÂN
                 'field_id' => $request->field_id,
                 'day_book' => $request->day_book,
                 'start_time' => $request->start_time,
                 'end_time' => $request->end_time,
-                'total_price' => $request->total_price,
-                'payment_status' => 'pending',  // 🔥 Trạng thái thanh toán
-                'payment_method' => $request->payment_method,
+                'total_price' => $calculatedPrice,  // 🔥 Backend tự động tính, không dùng giá từ FE
+                'payment_status' => 'pending',  // 🔥 Trạng thái thanh toán (chưa thanh toán)
+                'payment_method' => $request->payment_method,  // 🔥 User chọn SAU KHI owner xác nhận booking
             ]);
 
             // Load relationships
             $book->load(['user', 'field.fieldCluster.owner']);
 
-            // 🔔 Tạo thông báo nhắc nhở thanh toán cho user
+            // Lấy field cluster để dùng trong notifications và payment info
+            $fieldCluster = $book->field->fieldCluster;
+
+            // 🔔 Tạo thông báo cho user
             try {
-                $paymentMethodText = $request->payment_method === 'cash' ? 'tiền mặt tại sân' : 'chuyển khoản và upload bill';
                 Notification::create([
                     'user_id' => $currentUser->id,
                     'type' => 'booking_created',
-                    'title' => '⚠️ Vui lòng thanh toán để hoàn tất đặt sân',
-                    'message' => "Bạn đã đặt sân {$book->field->fieldCluster->name} vào ngày {$book->day_book->format('d/m/Y')} ({$book->start_time} - {$book->end_time}). Vui lòng thanh toán {$paymentMethodText} để hoàn tất booking.",
+                    'title' => '⏳ Đơn đặt sân đang chờ xác nhận',
+                    'message' => "Bạn đã đặt sân {$book->field->fieldCluster->name} vào ngày {$book->day_book->format('d/m/Y')} ({$book->start_time} - {$book->end_time}). Vui lòng chờ chủ sân xác nhận đặt sân.",
                     'data' => [
                         'booking_id' => $book->id,
                         'field_name' => $book->field->name ?? '',
                         'field_cluster_name' => $book->field->fieldCluster->name,
-                        'day_book' => $book->day_book,
+                        'day_book' => $book->day_book->format('Y-m-d'),
                         'start_time' => $book->start_time,
                         'end_time' => $book->end_time,
-                        'payment_method' => $request->payment_method,
+                        'payment_method' => $request->payment_method,  // Phương thức thanh toán
                         'payment_status' => 'pending',
-                        'total_price' => $request->total_price,
-                        'action_required' => 'payment',
+                        'booking_status' => 'pending_confirmation',
+                        'total_price' => $calculatedPrice,
+                        'action_required' => 'wait_confirmation',
                     ],
                 ]);
             } catch (Exception $notifError) {
                 Log::warning('Failed to create booking notification: ' . $notifError->getMessage());
             }
 
-            // Chuẩn bị payment info với QR code
-            $fieldCluster = $book->field->fieldCluster;
-            $paymentInfo = [
-                'status' => 'pending',
-                'payment_method' => $request->payment_method,
-                'total_price' => $request->total_price,
-            ];
+            // 🔔 Tạo thông báo cho owner để xác nhận đặt sân
+            try {
+                if ($fieldCluster->owner && $fieldCluster->owner->user) {
+                    $paymentMethodLabel = match($request->payment_method) {
+                        'cash' => 'Tiền mặt',
+                        'transfer' => 'Chuyển khoản',
+                        default => $request->payment_method
+                    };
 
-            // Nếu thanh toán qua transfer → trả về QR code của chủ sân
-            if ($request->payment_method === 'transfer') {
-                if ($fieldCluster->owner && $fieldCluster->owner->qr_code_image) {
-                    $paymentInfo['qr_code_url'] = $fieldCluster->owner->qr_code_image;
-                    $paymentInfo['instruction'] = "Vui lòng quét mã QR để chuyển khoản ĐÚNG số tiền: " . number_format($request->total_price) . " VNĐ và ghi nội dung: BOOK-{$book->id}";
-                    $paymentInfo['transfer_note'] = "BOOK-{$book->id}";
-                    $paymentInfo['message'] = 'Vui lòng quét mã QR và chuyển khoản. Sau khi chuyển khoản, upload bill để chủ sân xác nhận.';
-                } else {
-                    $paymentInfo['message'] = 'Chủ sân chưa cập nhật QR code. Vui lòng liên hệ chủ sân để được hướng dẫn thanh toán.';
-                    $paymentInfo['owner_contact'] = [
-                        'name' => $fieldCluster->name,
-                        'phone' => $fieldCluster->phone,
-                        'address' => $fieldCluster->address,
-                    ];
+                    $userContact = $currentUser->phone ?? $currentUser->email;
+
+                    Notification::create([
+                        'user_id' => $fieldCluster->owner->user->id,
+                        'type' => 'booking_pending_confirmation',
+                        'title' => '📋 Có đơn đặt sân mới cần xác nhận',
+                        'message' => "User {$currentUser->name} ({$userContact}) đã đặt sân tại {$fieldCluster->name} vào ngày {$book->day_book->format('d/m/Y')} ({$book->start_time} - {$book->end_time}). Số tiền: " . number_format($calculatedPrice) . " VNĐ. Hình thức thanh toán: {$paymentMethodLabel}. Vui lòng xác nhận hoặc từ chối đơn đặt sân.",
+                        'data' => [
+                            'booking_id' => $book->id,
+                            'user_name' => $currentUser->name,
+                            'user_email' => $currentUser->email,
+                            'user_phone' => $currentUser->phone ?? null,
+                            'field_cluster_name' => $fieldCluster->name,
+                            'day_book' => $book->day_book->format('Y-m-d'),
+                            'start_time' => $book->start_time,
+                            'end_time' => $book->end_time,
+                            'total_price' => $calculatedPrice,
+                            'payment_method' => $request->payment_method,
+                            'payment_method_label' => $paymentMethodLabel,
+                            'action_required' => 'confirm_booking',
+                        ],
+                    ]);
                 }
-            } else {
-                // Thanh toán tiền mặt
-                $paymentInfo['instruction'] = "Vui lòng liên hệ chủ sân để thanh toán tiền mặt. Số tiền: " . number_format($request->total_price) . " VNĐ";
-                $paymentInfo['owner_contact'] = [
-                    'name' => $fieldCluster->name,
-                    'phone' => $fieldCluster->phone,
-                    'address' => $fieldCluster->address,
-                ];
-                $paymentInfo['message'] = 'Vui lòng liên hệ chủ sân để thanh toán tiền mặt.';
+            } catch (Exception $notifError) {
+                Log::warning('Failed to create owner notification: ' . $notifError->getMessage());
             }
 
+            // 🔥 KHÔNG trả về payment info vì user chưa chọn payment_method
+            // User sẽ chọn payment_method SAU KHI owner xác nhận booking
+
             return ApiResponse::success(
-                'Đặt sân thành công! Vui lòng thanh toán với chủ sân và chờ xác nhận thanh toán để hoàn tất đặt sân.',
+                'Đặt sân thành công! Vui lòng chờ chủ sân xác nhận đơn đặt sân của bạn.',
                 [
                     'booking' => $book,
-                    'payment_info' => $paymentInfo,
+                    'status' => 'pending_confirmation',
+                    'message' => 'Đơn đặt sân đang chờ chủ sân xác nhận. Bạn sẽ nhận được thông báo khi đơn được xử lý.',
                 ],
                 201
             );
@@ -228,7 +298,6 @@ class BookController extends Controller
             return ApiResponse::error('Đặt sân thất bại', $e->getMessage(), 500);
         }
     }
-
     /**
      * Display the specified resource.
      */
@@ -481,6 +550,261 @@ class BookController extends Controller
     }
 
     /**
+     * Owner/Staff xác nhận hoặc từ chối đơn đặt sân
+     * API mới: POST /api/books/{id}/confirm-booking
+     * Body: { "action": "approve|reject", "note": "..." }
+     */
+    public function confirmBooking(Request $request, string $id)
+    {
+        try {
+            Log::info('🔍 [BOOKING CONFIRM] API được gọi', [
+                'booking_id' => $id,
+                'action' => $request->action,
+            ]);
+
+            $book = Book::with(['user', 'field.fieldCluster.owner.user'])->find($id);
+
+            if (!$book) {
+                return ApiResponse::error('Không tìm thấy booking', null, 404);
+            }
+
+            $currentUser = auth('api')->user();
+
+            if (!$currentUser) {
+                return ApiResponse::error('Không xác thực được người dùng', null, 401);
+            }
+
+            // Chỉ owner của sân hoặc admin hoặc staff mới được xác nhận
+            if ($currentUser->role->name_role !== 'admin') {
+                if ($currentUser->role->name_role === 'owner') {
+                    if (!$currentUser->ownerProfile || $book->field->fieldCluster->owner_id !== $currentUser->ownerProfile->id) {
+                        return ApiResponse::error('Bạn không có quyền xác nhận đơn đặt sân này', null, 403);
+                    }
+                } elseif ($currentUser->role->name_role === 'staff') {
+                    // Staff cần thuộc cụm sân đó
+                    $staff = $currentUser->staff;
+                    if (!$staff || $staff->field_cluster_id !== $book->field->field_cluster_id) {
+                        return ApiResponse::error('Bạn không có quyền xác nhận đơn đặt sân này', null, 403);
+                    }
+                } else {
+                    return ApiResponse::error('Bạn không có quyền xác nhận đơn đặt sân', null, 403);
+                }
+            }
+
+            // Kiểm tra booking đang ở trạng thái pending_confirmation
+            if ($book->status !== 'pending') {
+                return ApiResponse::error('Đơn đặt sân này không ở trạng thái chờ xác nhận', null, 400);
+            }
+
+            $validator = Validator::make($request->all(), [
+                'action' => ['required', 'in:approve,reject'],
+                'note' => ['nullable', 'string', 'max:500'],
+            ]);
+
+            if ($validator->fails()) {
+                return ApiResponse::error('Validation failed', $validator->errors(), 422);
+            }
+
+            if ($request->action === 'approve') {
+                // ✅ XÁC NHẬN ĐẶT SÂN
+                $book->status = 'confirmed';
+                $book->confirmed_by_user_id = $currentUser->id;
+                $book->save();
+
+                $message = 'Đã xác nhận đơn đặt sân. User có thể thanh toán.';
+
+                // 🔔 Thông báo cho user
+                try {
+                    $fieldCluster = $book->field->fieldCluster;
+                    $paymentMethodLabel = $book->payment_method === 'cash' ? 'Tiền mặt' : 'Chuyển khoản';
+                    $actionMessage = $book->payment_method === 'cash'
+                        ? 'Vui lòng thanh toán tiền mặt khi đến sân.'
+                        : 'Vui lòng chuyển khoản và upload bill thanh toán.';
+
+                    Notification::create([
+                        'user_id' => $book->user_id,
+                        'type' => 'booking_confirmed',
+                        'title' => '✅ Đơn đặt sân đã được xác nhận',
+                        'message' => "Đơn đặt sân tại {$fieldCluster->name} vào ngày {$book->day_book->format('d/m/Y')} ({$book->start_time} - {$book->end_time}) đã được chủ sân xác nhận. Hình thức thanh toán: {$paymentMethodLabel}. {$actionMessage}",
+                        'data' => [
+                            'booking_id' => $book->id,
+                            'field_cluster_name' => $fieldCluster->name,
+                            'day_book' => $book->day_book->format('Y-m-d'),
+                            'start_time' => $book->start_time,
+                            'end_time' => $book->end_time,
+                            'total_price' => $book->total_price,
+                            'payment_method' => $book->payment_method,
+                            'payment_method_label' => $paymentMethodLabel,
+                            'action_required' => $book->payment_method === 'transfer' ? 'proceed_payment' : 'pay_at_venue',
+                        ],
+                    ]);
+                } catch (Exception $notifError) {
+                    Log::warning('Failed to create booking confirmation notification: ' . $notifError->getMessage());
+                }
+
+            } else {
+                // ❌ TỪ CHỐI ĐẶT SÂN
+                $book->status = 'rejected';
+                $book->confirmed_by_user_id = $currentUser->id;
+                $book->confirmed_at = now();
+                $book->confirmation_note = $request->note;
+                $book->save();
+
+                $message = 'Đã từ chối đơn đặt sân. Khung giờ đã được giải phóng.';
+
+                Log::info('🔥 [BOOKING REJECT] Booking rejected, slot released', [
+                    'booking_id' => $book->id,
+                    'status' => 'rejected',
+                ]);
+
+                // 🔔 Thông báo cho user
+                try {
+                    Notification::create([
+                        'user_id' => $book->user_id,
+                        'type' => 'booking_rejected',
+                        'title' => '❌ Đơn đặt sân bị từ chối',
+                        'message' => "Đơn đặt sân tại {$book->field->fieldCluster->name} vào ngày {$book->day_book->format('d/m/Y')} đã bị từ chối. Lý do: " . ($request->note ?? 'Không có lý do cụ thể'),
+                        'data' => [
+                            'booking_id' => $book->id,
+                            'field_cluster_name' => $book->field->fieldCluster->name,
+                            'rejected_reason' => $request->note ?? null,
+                        ],
+                    ]);
+                } catch (Exception $notifError) {
+                    Log::warning('Failed to create booking rejection notification: ' . $notifError->getMessage());
+                }
+            }
+
+            // Load lại booking với đầy đủ thông tin
+            $book->load(['user', 'field.fieldCluster']);
+
+            return ApiResponse::success(
+                $message,
+                [
+                    'booking_id' => $book->id,
+                    'status' => $book->status,
+                    'confirmed_at' => $book->confirmed_at,
+                    'confirmed_by' => $currentUser->name,
+                    'note' => $request->note ?? null,
+                    'booking_info' => [
+                        'field_cluster_name' => $book->field->fieldCluster->name,
+                        'day_book' => $book->day_book->format('d/m/Y'),
+                        'time_slot' => "{$book->start_time} - {$book->end_time}",
+                        'total_price' => number_format($book->total_price) . ' VNĐ',
+                        'payment_method' => $book->payment_method === 'cash' ? 'Tiền mặt' : 'Chuyển khoản',
+                        'customer_name' => $book->user->name,
+                        'customer_phone' => $book->user->phone ?? null,
+                        'customer_email' => $book->user->email,
+                    ],
+                ],
+                200
+            );
+        } catch (Exception $e) {
+            return ApiResponse::error('Xác nhận thất bại', $e->getMessage(), 500);
+        }
+    }
+
+    /**
+     * User thay đổi phương thức thanh toán (nếu chưa thanh toán)
+     * API: POST /api/books/{id}/select-payment-method
+     * Body: { "payment_method": "cash|transfer" }
+     *
+     * ⚠️ LƯU Ý: API này cho phép user THAY ĐỔI payment_method sau khi đã chọn lúc tạo booking
+     * Chỉ cho phép thay đổi khi chưa thanh toán (payment_status = 'pending')
+     */
+    public function selectPaymentMethod(Request $request, string $id)
+    {
+        try {
+            $book = Book::with(['user', 'field.fieldCluster.owner'])->find($id);
+
+            if (!$book) {
+                return ApiResponse::error('Không tìm thấy booking', null, 404);
+            }
+
+            $currentUser = auth('api')->user();
+
+            if (!$currentUser) {
+                return ApiResponse::error('Không xác thực được người dùng', null, 401);
+            }
+
+            // Chỉ user sở hữu booking mới được thay đổi payment_method
+            if ($book->user_id !== $currentUser->id) {
+                return ApiResponse::error('Bạn không có quyền thay đổi phương thức thanh toán cho booking này', null, 403);
+            }
+
+            // Chỉ cho phép thay đổi nếu chưa thanh toán
+            if ($book->payment_status !== 'pending') {
+                return ApiResponse::error('Không thể thay đổi phương thức thanh toán vì booking đã ' . ($book->payment_status === 'paid' ? 'thanh toán' : 'bị từ chối thanh toán'), null, 400);
+            }
+
+            $validator = Validator::make($request->all(), [
+                'payment_method' => ['required', 'in:cash,transfer'],
+            ]);
+
+            if ($validator->fails()) {
+                return ApiResponse::error('Validation failed', $validator->errors(), 422);
+            }
+
+            // Lưu payment_method cũ để so sánh
+            $oldPaymentMethod = $book->payment_method;
+
+            // Cập nhật payment_method
+            $book->payment_method = $request->payment_method;
+
+            // Nếu đổi từ transfer sang cash hoặc ngược lại, xóa bill cũ
+            if ($oldPaymentMethod !== $request->payment_method && $book->payment_proof) {
+                $book->payment_proof = null;
+            }
+
+            $book->save();
+
+            // Chuẩn bị response với thông tin thanh toán
+            $fieldCluster = $book->field->fieldCluster;
+            $paymentInfo = [
+                'booking_id' => $book->id,
+                'payment_method' => $book->payment_method,
+                'total_price' => $book->total_price,
+            ];
+
+            if ($request->payment_method === 'transfer') {
+                // Trả về QR code để thanh toán
+                if ($fieldCluster->owner && $fieldCluster->owner->qr_code_image) {
+                    $paymentInfo['qr_code_url'] = $fieldCluster->owner->qr_code_image;
+                    $paymentInfo['instruction'] = "Vui lòng quét mã QR để chuyển khoản ĐÚNG số tiền: " . number_format($book->total_price) . " VNĐ và ghi nội dung: BOOK-{$book->id}";
+                    $paymentInfo['transfer_note'] = "BOOK-{$book->id}";
+                    $paymentInfo['next_step'] = 'upload_bill';
+                    $paymentInfo['message'] = 'Vui lòng chuyển khoản và upload bill để chủ sân xác nhận.';
+                } else {
+                    $paymentInfo['message'] = 'Chủ sân chưa cập nhật QR code. Vui lòng liên hệ chủ sân để được hướng dẫn thanh toán.';
+                }
+            } else {
+                // Thanh toán tiền mặt
+                $paymentInfo['instruction'] = "Vui lòng thanh toán tiền mặt tại sân. Số tiền: " . number_format($book->total_price) . " VNĐ";
+                $paymentInfo['next_step'] = 'pay_at_venue';
+                $paymentInfo['message'] = 'Vui lòng đến sân và thanh toán tiền mặt.';
+            }
+
+            $paymentInfo['owner_contact'] = [
+                'name' => $fieldCluster->name,
+                'phone' => $fieldCluster->phone,
+                'address' => $fieldCluster->address,
+            ];
+
+            $message = $oldPaymentMethod !== $request->payment_method
+                ? 'Đã thay đổi phương thức thanh toán thành: ' . ($request->payment_method === 'cash' ? 'Tiền mặt' : 'Chuyển khoản')
+                : 'Phương thức thanh toán: ' . ($request->payment_method === 'cash' ? 'Tiền mặt' : 'Chuyển khoản');
+
+            return ApiResponse::success(
+                $message,
+                $paymentInfo,
+                200
+            );
+        } catch (Exception $e) {
+            return ApiResponse::error('Thao tác thất bại', $e->getMessage(), 500);
+        }
+    }
+
+    /**
      * Upload payment proof (bill chuyển khoản)
      * User upload ảnh bill để chứng minh đã thanh toán
      */
@@ -503,6 +827,16 @@ class BookController extends Controller
             // Chỉ user sở hữu booking mới được upload
             if ($book->user_id !== $currentUser->id) {
                 return ApiResponse::error('Bạn không có quyền upload bill cho booking này', null, 403);
+            }
+
+            // 🔥 Kiểm tra booking đã được xác nhận chưa
+            if ($book->status !== 'confirmed') {
+                return ApiResponse::error('Đơn đặt sân chưa được chủ sân xác nhận. Vui lòng chờ xác nhận trước khi thanh toán.', null, 400);
+            }
+
+            // 🔥 Kiểm tra đã chọn payment_method chưa
+            if ($book->payment_method === null) {
+                return ApiResponse::error('Bạn chưa chọn phương thức thanh toán. Vui lòng chọn phương thức thanh toán trước.', null, 400);
             }
 
             // Chỉ booking chọn transfer mới cần upload bill
@@ -557,7 +891,7 @@ class BookController extends Controller
                             'booking_id' => $book->id,
                             'user_name' => $book->user->name,
                             'field_cluster_name' => $fieldCluster->name,
-                            'day_book' => $book->day_book,
+                            'day_book' => $book->day_book->format('Y-m-d'),
                             'start_time' => $book->start_time,
                             'end_time' => $book->end_time,
                             'total_price' => $book->total_price,
@@ -617,7 +951,17 @@ class BookController extends Controller
                 }
             }
 
-            // Kiểm tra booking đang ở trạng thái pending
+            // 🔥 Kiểm tra booking đã được xác nhận đặt sân chưa
+            if ($book->status !== 'confirmed') {
+                return ApiResponse::error('Đơn đặt sân chưa được xác nhận. Chỉ có thể xác nhận thanh toán sau khi đơn đặt sân được approve.', null, 400);
+            }
+
+            // 🔥 Kiểm tra user đã chọn payment_method chưa
+            if ($book->payment_method === null) {
+                return ApiResponse::error('User chưa chọn phương thức thanh toán.', null, 400);
+            }
+
+            // Kiểm tra booking đang ở trạng thái pending payment
             if ($book->payment_status !== 'pending') {
                 return ApiResponse::error('Booking này không ở trạng thái chờ thanh toán', null, 400);
             }
@@ -639,7 +983,7 @@ class BookController extends Controller
             // Update payment status
             if ($request->action === 'approve') {
                 $book->payment_status = 'paid';
-                $book->status = 'confirmed';  // 🔥 UPDATE booking status
+                $book->status = 'completed';  // 🔥 ĐÃ HOÀN TẤT (confirmed + paid)
                 $book->payment_confirmed_at = now();
                 $book->confirmed_by_user_id = $currentUser->id;  // 🔥 LƯU NGƯỜI XÁC NHẬN
                 $message = 'Xác nhận thanh toán và booking thành công';
@@ -672,7 +1016,7 @@ class BookController extends Controller
                             'booking_id' => $book->id,
                             'field_name' => $book->field->name ?? '',
                             'field_cluster_name' => $book->field->fieldCluster->name,
-                            'day_book' => $book->day_book,
+                            'day_book' => $book->day_book->format('Y-m-d'),
                             'start_time' => $book->start_time,
                             'end_time' => $book->end_time,
                             'payment_method' => $book->payment_method,
@@ -685,9 +1029,10 @@ class BookController extends Controller
                 }
             } else {
                 $book->payment_status = 'failed';
-                $book->status = 'cancelled';  // 🔥 HỦY booking để giải phóng khung giờ (KHÔNG xóa, giữ lại để user xem lịch sử)
+                // 🔥 GIỮ NGUYÊN status='confirmed' vì đã xác nhận đặt sân, chỉ từ chối thanh toán
+                // Nếu muốn hủy booking thì owner dùng API khác
 
-                Log::info('🔥 [BOOK REJECT] Booking #{$book->id} cancelled (NOT DELETED)', [
+                Log::info('🔥 [PAYMENT REJECT] Payment rejected but booking still confirmed', [
                     'booking_id' => $book->id,
                     'tournament_id' => $book->tournament_id,
                     'status' => 'cancelled',

@@ -598,15 +598,28 @@ class TournamentController extends Controller
                 return ApiResponse::error('Chỉ publish được giải ở trạng thái draft', null, 400);
             }
 
-            // ✅ Kiểm tra đã thanh toán chưa
-            if ($tournament->payment_status !== 'paid') {
-                $paymentMethodText = $tournament->payment_method === 'cash' ? 'tiền mặt tại sân' : 'chuyển khoản và upload bill';
+            // ✅ Kiểm tra đã có booking chưa
+            $bookings = \App\Models\Book::where('tournament_id', $tournament->id)
+                ->where('booking_type', 'tournament')
+                ->get();
+
+            if ($bookings->isEmpty()) {
                 return ApiResponse::error(
-                    'Bạn cần hoàn thành thanh toán trước khi mở đăng ký giải đấu. ' .
-                    'Vui lòng thanh toán bằng ' . $paymentMethodText . ' và chờ chủ sân xác nhận.',
+                    'Bạn cần đặt sân cho giải đấu trước khi mở đăng ký.',
+                    null,
+                    400
+                );
+            }
+
+            // ✅ Kiểm tra tất cả booking đã được chủ sân xác nhận chưa
+            $pendingBookings = $bookings->where('status', 'pending');
+            if ($pendingBookings->isNotEmpty()) {
+                return ApiResponse::error(
+                    'Chủ sân chưa xác nhận đặt sân. Vui lòng chờ chủ sân xác nhận trước khi mở đăng ký giải đấu.',
                     [
-                        'payment_status' => $tournament->payment_status,
-                        'payment_method' => $tournament->payment_method,
+                        'total_bookings' => $bookings->count(),
+                        'pending_bookings' => $pendingBookings->count(),
+                        'confirmed_bookings' => $bookings->where('status', 'confirmed')->count(),
                     ],
                     400
                 );
@@ -1549,6 +1562,128 @@ class TournamentController extends Controller
         }
     }
 
+    // ================================================================
+    // CONFIRM TOURNAMENT BOOKINGS — Chủ sân xác nhận tất cả booking của giải
+    // PUT /tournaments/{id}/confirm-bookings
+    // Body: { "action": "approve" hoặc "reject", "note": "..." }
+    // ================================================================
+    public function confirmTournamentBookings(Request $request, string $id)
+    {
+        try {
+            $tournament = Tournament::with('fieldCluster.owner')->findOrFail($id);
+            $currentUser = Auth::user();
+
+            // Kiểm tra quyền: Chỉ owner của cụm sân mới được confirm
+            if (!$currentUser->ownerProfile) {
+                return ApiResponse::error('Bạn không phải là chủ sân', null, 403);
+            }
+
+            $fieldCluster = $tournament->fieldCluster;
+            if (!$fieldCluster || $fieldCluster->owner_id !== $currentUser->ownerProfile->id) {
+                return ApiResponse::error('Bạn không phải chủ sân của giải đấu này', null, 403);
+            }
+
+            // Validate
+            $validated = $request->validate([
+                'action' => ['required', 'in:approve,reject'],
+                'note' => ['nullable', 'string', 'max:500'],
+            ]);
+
+            // Lấy tất cả bookings của giải
+            $bookings = \App\Models\Book::where('tournament_id', $tournament->id)
+                ->where('booking_type', 'tournament')
+                ->get();
+
+            if ($bookings->isEmpty()) {
+                return ApiResponse::error('Giải đấu này chưa có booking nào', null, 400);
+            }
+
+            // Kiểm tra xem đã confirm hết chưa
+            $pendingBookings = $bookings->where('status', 'pending');
+            if ($pendingBookings->isEmpty() && $validated['action'] === 'approve') {
+                return ApiResponse::error('Tất cả booking đã được xác nhận trước đó', null, 400);
+            }
+
+            if ($validated['action'] === 'approve') {
+                // Xác nhận tất cả bookings
+                \App\Models\Book::where('tournament_id', $tournament->id)
+                    ->where('booking_type', 'tournament')
+                    ->where('status', 'pending')
+                    ->update([
+                        'status' => 'confirmed',
+                        'confirmed_by_user_id' => $currentUser->id,
+                    ]);
+
+                $message = 'Đã xác nhận tất cả booking của giải đấu';
+
+                // Tạo thông báo cho người tổ chức
+                try {
+                    \App\Models\Notification::create([
+                        'user_id' => $tournament->organizer_id,
+                        'type' => 'tournament_booking_confirmed',
+                        'title' => '✅ Chủ sân đã xác nhận đặt sân',
+                        'message' => "Chủ sân đã xác nhận tất cả {$bookings->count()} booking cho giải đấu \"{$tournament->name}\". Bạn có thể mở đăng ký giải ngay bây giờ.",
+                        'data' => [
+                            'tournament_id' => $tournament->id,
+                            'tournament_name' => $tournament->name,
+                            'total_bookings' => $bookings->count(),
+                            'total_price' => $bookings->sum('total_price'),
+                        ],
+                        'action_required' => false,
+                    ]);
+                } catch (\Exception $notifError) {
+                    Log::warning('Failed to create booking confirmation notification: ' . $notifError->getMessage());
+                }
+            } else {
+                // Từ chối tất cả bookings
+                $rejectedReason = $validated['note'] ?? 'Không có lý do cụ thể';
+
+                \App\Models\Book::where('tournament_id', $tournament->id)
+                    ->where('booking_type', 'tournament')
+                    ->where('status', 'pending')
+                    ->update([
+                        'status' => 'cancelled',
+                        'payment_note' => $rejectedReason,
+                    ]);
+
+                $message = 'Đã từ chối tất cả booking của giải đấu';
+
+                // Tạo thông báo cho người tổ chức
+                try {
+                    \App\Models\Notification::create([
+                        'user_id' => $tournament->organizer_id,
+                        'type' => 'tournament_booking_rejected',
+                        'title' => '❌ Chủ sân từ chối đặt sân',
+                        'message' => "Chủ sân đã từ chối booking cho giải đấu \"{$tournament->name}\". Lý do: {$rejectedReason}",
+                        'data' => [
+                            'tournament_id' => $tournament->id,
+                            'tournament_name' => $tournament->name,
+                            'rejected_reason' => $rejectedReason,
+                        ],
+                        'action_required' => false,
+                    ]);
+                } catch (\Exception $notifError) {
+                    Log::warning('Failed to create booking rejection notification: ' . $notifError->getMessage());
+                }
+            }
+
+            // Refresh bookings
+            $updatedBookings = \App\Models\Book::where('tournament_id', $tournament->id)
+                ->where('booking_type', 'tournament')
+                ->with(['field.fieldCluster'])
+                ->get();
+
+            return ApiResponse::success($message, [
+                'bookings' => $updatedBookings,
+                'total_bookings' => $updatedBookings->count(),
+                'confirmed_bookings' => $updatedBookings->where('status', 'confirmed')->count(),
+                'total_price' => $updatedBookings->sum('total_price'),
+            ]);
+        } catch (\Exception $e) {
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), null, 500);
+        }
+    }
+
     // Helper: Tính giờ từ session type
     private function getSessionTimeRange(string $sessionType): array
     {
@@ -1689,7 +1824,7 @@ class TournamentController extends Controller
                     ->where('booking_type', 'tournament')
                     ->update([
                         'payment_status' => 'paid',
-                        'status' => 'confirmed',
+                        'status' => 'completed',  // 🔥 CHUYỂN SANG COMPLETED (giống booking thường)
                         'payment_confirmed_at' => now(),
                         'payment_method' => $tournament->payment_method,
                     ]);

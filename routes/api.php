@@ -178,6 +178,12 @@ Route::middleware('jwt.auth')->group(function () {
     // Lấy thông tin thanh toán (bao gồm QR code)
     Route::get('books/{id}/payment-info', [BookController::class, 'getPaymentInfo']);
 
+    // 🔥 Owner/Staff xác nhận hoặc từ chối đặt sân
+    Route::post('books/{id}/confirm-booking', [BookController::class, 'confirmBooking']);
+
+    // 🔥 User chọn phương thức thanh toán SAU KHI owner xác nhận
+    Route::post('books/{id}/select-payment-method', [BookController::class, 'selectPaymentMethod']);
+
     // Upload bill chuyển khoản cho booking
     Route::post('books/{id}/upload-payment-proof', [BookController::class, 'uploadPaymentProof']);
 
@@ -230,6 +236,10 @@ Route::middleware('jwt.auth')->group(function () {
     Route::post('tournaments/{id}/book-fields', [TournamentController::class, 'bookFields']);
     Route::get('tournaments/{id}/field-bookings', [TournamentController::class, 'getFieldBookings']);
     Route::delete('tournaments/{id}/field-bookings/{booking_id}', [TournamentController::class, 'deleteFieldBooking']);
+
+    // Owner xác nhận tất cả booking của giải (giống như confirm booking thường)
+    Route::put('tournaments/{id}/confirm-bookings', [TournamentController::class, 'confirmTournamentBookings']);
+
     Route::delete('tournaments/{tournament}', [TournamentController::class, 'destroy']);
 
     // ==========================================

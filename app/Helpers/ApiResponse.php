@@ -34,4 +34,22 @@ class ApiResponse
 
         return response()->json($payload, $status);
     }
+
+    /**
+     * Return error response with data (for business logic errors, not validation errors)
+     */
+    public static function errorWithData(string $message, $data = null, int $status = 400): JsonResponse
+    {
+        $payload = [
+            'success' => false,
+            'message' => $message,
+            'code' => $status,
+        ];
+
+        if (!is_null($data)) {
+            $payload['data'] = $data;
+        }
+
+        return response()->json($payload, $status);
+    }
 }
