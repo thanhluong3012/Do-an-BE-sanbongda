@@ -194,7 +194,7 @@ class TournamentScheduleService
 
         // Tạo các vòng knockout
         for ($r = 0; $r < $numRounds; $r++) {
-            $roundType = $roundTypes[$r] ?? 'knockout';
+            $roundType = $roundTypes[$r] ?? 'round_of_32';
             $roundName = $this->getRoundNameForType($roundType);
             
             $round = TournamentRound::create([
@@ -508,7 +508,7 @@ class TournamentScheduleService
         $knockoutRoundData = [];
 
         for ($r = 0; $r < $numKnockoutRounds; $r++) {
-            $roundType = $roundTypes[$r] ?? 'knockout';
+            $roundType = $roundTypes[$r] ?? 'round_of_32';
             $roundName = $this->getRoundNameForType($roundType);
             $roundStartDate = $knockoutStartDate->copy()->addDays($r * $daysBetweenRounds);
 
@@ -959,9 +959,18 @@ class TournamentScheduleService
     private function getRoundTypesForTeamCount(int $bracketSize): array
     {
         $numRounds = (int) log($bracketSize, 2);
+        // Hỗ trợ từ 2 đến 64 đội (1-6 vòng)
         $types = ['final', 'semi_final', 'quarter_final', 'round_of_16', 'round_of_32'];
         
-        return array_slice(array_reverse($types), 0, $numRounds);
+        // Nếu cần nhiều hơn 5 vòng (64 đội trở lên), dùng round_of_32 cho các vòng đầu
+        $result = array_slice(array_reverse($types), 0, min($numRounds, count($types)));
+        
+        // Bổ sung thêm vòng nếu thiếu (dùng round_of_32 cho các vòng đầu)
+        while (count($result) < $numRounds) {
+            array_unshift($result, 'round_of_32');
+        }
+        
+        return $result;
     }
 
     /**
