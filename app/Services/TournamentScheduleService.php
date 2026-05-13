@@ -31,6 +31,8 @@ class TournamentScheduleService
         array $timeSlots,
         array $fieldIds,
         int $daysBetweenRounds,
+        int $matchDuration = 60,
+        int $preparationTime = 15,
         bool $shuffleTeams = true
     ): array {
         // Xáo trộn đội nếu cần
@@ -102,6 +104,8 @@ class TournamentScheduleService
             startDate: $startDate,
             timeSlots: $timeSlots,
             fieldIds: $fieldIds,
+            matchDuration: $matchDuration,
+            preparationTime: $preparationTime,
             groupId: null // Không cần truyền groupId vì đã có trong pairings
         );
 
@@ -145,6 +149,8 @@ class TournamentScheduleService
         array $timeSlots,
         array $fieldIds,
         int $daysBetweenRounds,
+        int $matchDuration = 60,
+        int $preparationTime = 15,
         bool $shuffleTeams = true,
         bool $createThirdPlaceMatch = false
     ): array {
@@ -162,18 +168,42 @@ class TournamentScheduleService
         $numByeTeams = $bracketSize - $n;
         $numRounds = (int) log($bracketSize, 2);
 
-        // Tạo danh sách đội với BYE
+        // Chọn ngẫu nhiên các đội để bye vào vòng trong
         $teamsWithBye = $teamList->values()->all();
-        for ($i = 0; $i < $numByeTeams; $i++) {
-            $teamsWithBye[] = null; // null = BYE
+        $byeTeamIndices = [];
+        
+        if ($numByeTeams > 0) {
+            // Chọn ngẫu nhiên $numByeTeams từ $n đội
+            $allIndices = range(0, $n - 1);
+            shuffle($allIndices);
+            $byeTeamIndices = array_slice($allIndices, 0, $numByeTeams);
+            $byeTeamIndices = array_flip($byeTeamIndices); // Chuyển thành key map
         }
-
+        
+        // Xáo trộn lại danh sách với bye teams ở cuối
+        $rearrangedTeams = [];
+        for ($i = 0; $i < $n; $i++) {
+            if (!isset($byeTeamIndices[$i])) {
+                $rearrangedTeams[] = $teamsWithBye[$i];
+            }
+        }
+        // Thêm bye teams vào cuối
+        for ($i = 0; $i < $n; $i++) {
+            if (isset($byeTeamIndices[$i])) {
+                $rearrangedTeams[] = $teamsWithBye[$i];
+            }
+        }
+        // Thêm null cho bye slots
+        for ($i = 0; $i < $numByeTeams; $i++) {
+            $rearrangedTeams[] = null; // null = BYE slot
+        }
+        
         // Tạo bracket ban đầu (vòng 1)
         $currentBracket = [];
         for ($i = 0; $i < $bracketSize / 2; $i++) {
             $currentBracket[] = [
-                'home' => $teamsWithBye[$i * 2] ?? null,
-                'away' => $teamsWithBye[$i * 2 + 1] ?? null,
+                'home' => $rearrangedTeams[$i * 2] ?? null,
+                'away' => $rearrangedTeams[$i * 2 + 1] ?? null,
             ];
         }
 
@@ -225,7 +255,7 @@ class TournamentScheduleService
                     $awayFromPosition = $awayFromMatchId ? "Thắng trận #{$previousRoundMatches[$idx * 2 + 1]->match_number}" : null;
                 }
 
-                // Xử lý BYE và placeholder: team gặp BYE tự động thắng
+                // Xử lý BYE: team gặp BYE tự động vào vòng sau, KHÔNG tạo trận
                 if ($home === null && $away === null) {
                     if ($r === 0) {
                         // Vòng 1: Cả 2 đều null = không nên xảy ra, bỏ qua
@@ -243,26 +273,21 @@ class TournamentScheduleService
                         ];
                     }
                 } elseif ($home === null) {
-                    // Home BYE -> Away thắng, nhưng vẫn tạo trận để track
+                    // Home BYE -> Away tự động vào vòng sau, KHÔNG tạo trận
+                    // Đánh dấu winner để vòng sau biết
                     $pairings[] = [
                         'home_id' => null,
-                        'away_id' => $away->id,
-                        'home_from_match_id' => $homeFromMatchId,
-                        'away_from_match_id' => $awayFromMatchId,
-                        'home_from_position' => $homeFromPosition ?? 'BYE',
-                        'away_from_position' => $awayFromPosition,
-                        'winner' => $away,
+                        'away_id' => null,
+                        'winner' => $away, // Away tự động thắng
+                        'is_bye' => true,
                     ];
                 } elseif ($away === null) {
-                    // Away BYE -> Home thắng
+                    // Away BYE -> Home tự động vào vòng sau, KHÔNG tạo trận
                     $pairings[] = [
-                        'home_id' => $home->id,
+                        'home_id' => null,
                         'away_id' => null,
-                        'home_from_match_id' => $homeFromMatchId,
-                        'away_from_match_id' => $awayFromMatchId,
-                        'home_from_position' => $homeFromPosition,
-                        'away_from_position' => $awayFromPosition ?? 'BYE',
-                        'winner' => $home,
+                        'winner' => $home, // Home tự động thắng
+                        'is_bye' => true,
                     ];
                 } else {
                     // Trận đấu bình thường
@@ -286,6 +311,8 @@ class TournamentScheduleService
                 startDate: $currentDate,
                 timeSlots: $timeSlots,
                 fieldIds: $fieldIds,
+                matchDuration: $matchDuration,
+                preparationTime: $preparationTime,
                 groupId: null,
                 startMatchNumber: $matchNumber
             );
@@ -394,6 +421,8 @@ class TournamentScheduleService
         array $timeSlots,
         array $fieldIds,
         int $daysBetweenRounds,
+        int $matchDuration = 60,
+        int $preparationTime = 15,
         int $numGroups = 2,
         ?int $teamsPerGroup = null,
         bool $shuffleTeams = true,
@@ -488,6 +517,8 @@ class TournamentScheduleService
             startDate: $startDate,
             timeSlots: $timeSlots,
             fieldIds: $fieldIds,
+            matchDuration: $matchDuration,
+            preparationTime: $preparationTime,
             groupId: null, // Group ID đã có trong pairings
             startMatchNumber: $matchNumber
         );
@@ -507,23 +538,38 @@ class TournamentScheduleService
         // PHASE 2: Xác định đội vào knockout
         // ============================================
 
-        // Số đội qualified: Top 2 mỗi bảng
+        // Xác định số bảng lẻ hay chẵn
+        // Số đội qualified: Top 2 mỗi bảng = numGroups * 2
         $teamsAdvancing = $numGroups * 2;
 
-        // Tính bracket size chuẩn
+        // Tính bracket size chuẩn (2^n)
         $knockoutBracketSize = $this->getNextPowerOfTwo($teamsAdvancing);
         $missingSlots = $knockoutBracketSize - $teamsAdvancing;
 
-        $thirdPlaceTeamsAdded = 0;
-        $thirdPlaceTeamsList = [];
+        $extraQualifiedPositions = [];
 
-        // Nếu thiếu slot và auto_fill_third_place = true, lấy đội hạng 3 tốt nhất
+        // Nếu thiếu slot và auto_fill_third_place = true
+        // Công thức: Lấy đội hạng 3, 4, 5... tốt nhất từ TẤT CẢ các bảng
+        // Ví dụ: 5 bảng → 10 đội (top 2) + 5 hạng 3 + 1 hạng 4 = 16
+        //        7 bảng → 14 đội (top 2) + 2 hạng 3 = 16
         if ($missingSlots > 0 && $autoFillThirdPlace) {
-            $thirdPlaceTeamsList = $this->getBestThirdPlacedTeams($groups, $missingSlots);
-            $thirdPlaceTeamsAdded = count($thirdPlaceTeamsList);
+            $remainingSlots = $missingSlots;
+            $rank = 3;
+
+            while ($remainingSlots > 0) {
+                $take = min($remainingSlots, $numGroups);
+
+                for ($i = 1; $i <= $take; $i++) {
+                    $extraQualifiedPositions[] = "Hạng {$rank} tốt #{$i}";
+                }
+
+                $remainingSlots -= $take;
+                $rank++;
+            }
         }
 
-        $totalKnockoutTeams = $teamsAdvancing + $thirdPlaceTeamsAdded;
+        $extraTeamsAdded = count($extraQualifiedPositions);
+        $totalKnockoutTeams = $teamsAdvancing + $extraTeamsAdded;
         $knockoutBracketSize = $this->getNextPowerOfTwo($totalKnockoutTeams);
 
         // ============================================
@@ -552,41 +598,71 @@ class TournamentScheduleService
             $pairings = [];
             $matchesInRound = $knockoutBracketSize / (int) pow(2, $r + 1);
 
-            for ($m = 0; $m < $matchesInRound; $m++) {
-                if ($r === 0) {
-                    // Vòng đầu tiên: Cross-match giữa các bảng
-                    // Ví dụ: A1 vs B2, B1 vs A2, C1 vs D2, D1 vs C2...
-                    $pairIndex = (int) floor($m / 2);
-                    $groupA = $pairIndex * 2;
-                    $groupB = $pairIndex * 2 + 1;
+            if ($r === 0) {
+                $pairings = [];
 
-                    if ($groupA >= $numGroups || $groupB >= $numGroups) {
-                        // Nếu vượt quá số bảng, dùng placeholder
-                        $pairings[] = [
-                            'home_id' => null,
-                            'away_id' => null,
-                            'home_from_position' => 'TBD',
-                            'away_from_position' => 'TBD',
-                        ];
-                    } elseif ($m % 2 === 0) {
-                        // Match chẵn: Nhất A vs Nhì B
-                        $pairings[] = [
-                            'home_id' => null,
-                            'away_id' => null,
-                            'home_from_position' => "Nhất bảng {$groupLabels[$groupA]}",
-                            'away_from_position' => "Nhì bảng {$groupLabels[$groupB]}",
-                        ];
-                    } else {
-                        // Match lẻ: Nhất B vs Nhì A
-                        $pairings[] = [
-                            'home_id' => null,
-                            'away_id' => null,
-                            'home_from_position' => "Nhất bảng {$groupLabels[$groupB]}",
-                            'away_from_position' => "Nhì bảng {$groupLabels[$groupA]}",
-                        ];
-                    }
+                // Ghép các bảng theo cặp: A-B, C-D, E-F...
+                for ($g = 0; $g + 1 < $numGroups; $g += 2) {
+                    $groupA = $g;
+                    $groupB = $g + 1;
+
+                    $pairings[] = [
+                        'home_id' => null,
+                        'away_id' => null,
+                        'home_from_position' => "Nhất bảng {$groupLabels[$groupA]}",
+                        'away_from_position' => "Nhì bảng {$groupLabels[$groupB]}",
+                    ];
+
+                    $pairings[] = [
+                        'home_id' => null,
+                        'away_id' => null,
+                        'home_from_position' => "Nhất bảng {$groupLabels[$groupB]}",
+                        'away_from_position' => "Nhì bảng {$groupLabels[$groupA]}",
+                    ];
+                }
+
+                // Nếu số bảng lẻ, bảng cuối sẽ đấu với 2 đội extra tốt nhất
+                if ($numGroups % 2 === 1) {
+                    $oddGroupIndex = $numGroups - 1;
+                    $oddGroupLabel = $groupLabels[$oddGroupIndex];
+
+                    $pairings[] = [
+                        'home_id' => null,
+                        'away_id' => null,
+                        'home_from_position' => "Nhất bảng {$oddGroupLabel}",
+                        'away_from_position' => $extraQualifiedPositions[1] ?? 'TBD',
+                    ];
+
+                    $pairings[] = [
+                        'home_id' => null,
+                        'away_id' => null,
+                        'home_from_position' => "Nhì bảng {$oddGroupLabel}",
+                        'away_from_position' => $extraQualifiedPositions[0] ?? 'TBD',
+                    ];
+
+                    $extraStartIndex = 2;
                 } else {
-                    // Vòng sau: Thắng trận trước đó
+                    $extraStartIndex = 0;
+                }
+
+                // Các đội extra còn lại ghép với nhau: 3 vs cuối, 4 vs áp cuối...
+                $remainingExtras = array_slice($extraQualifiedPositions, $extraStartIndex);
+
+                while (count($remainingExtras) >= 2) {
+                    $first = array_shift($remainingExtras);
+                    $last = array_pop($remainingExtras);
+
+                    $pairings[] = [
+                        'home_id' => null,
+                        'away_id' => null,
+                        'home_from_position' => $first,
+                        'away_from_position' => $last,
+                    ];
+                }
+
+                $pairings = array_slice($pairings, 0, $matchesInRound);
+            } else {
+                for ($m = 0; $m < $matchesInRound; $m++) {
                     $prevMatches = $knockoutRoundData[$r - 1]['matches'];
                     $match1 = $prevMatches[$m * 2] ?? null;
                     $match2 = $prevMatches[$m * 2 + 1] ?? null;
@@ -610,6 +686,8 @@ class TournamentScheduleService
                 startDate: $roundStartDate,
                 timeSlots: $timeSlots,
                 fieldIds: $fieldIds,
+                matchDuration: $matchDuration,
+                preparationTime: $preparationTime,
                 groupId: null,
                 startMatchNumber: $matchNumber
             );
@@ -670,8 +748,8 @@ class TournamentScheduleService
             'num_groups' => $numGroups,
             'group_stage_matches' => $groupMatches->count(),
             'qualified_teams_count' => $totalKnockoutTeams,
-            'third_place_teams_added' => $thirdPlaceTeamsAdded,
-            'third_place_teams' => $thirdPlaceTeamsList,
+            'extra_teams_added' => $extraTeamsAdded,
+            'extra_qualified_positions' => $extraQualifiedPositions,
             'knockout_bracket_size' => $knockoutBracketSize,
             'knockout_rounds' => $numKnockoutRounds,
             'knockout_matches' => $knockoutMatchCount,
@@ -728,6 +806,9 @@ class TournamentScheduleService
     /**
      * Assign các trận đấu vào time slots và fields
      * Tránh conflict về thời gian và sân
+     * 
+     * @param int $matchDuration - Thời gian trung bình 1 trận (phút)
+     * @param int $preparationTime - Thời gian chuẩn bị sau trận (phút)
      */
     private function assignMatchesToSlots(
         Tournament $tournament,
@@ -736,6 +817,8 @@ class TournamentScheduleService
         Carbon $startDate,
         array $timeSlots,
         array $fieldIds,
+        int $matchDuration = 60,
+        int $preparationTime = 15,
         ?int $groupId = null,
         int $startMatchNumber = 1
     ): Collection {
@@ -758,8 +841,14 @@ class TournamentScheduleService
             $homeFromMatchId = $pairing['home_from_match_id'] ?? null;
             $awayFromMatchId = $pairing['away_from_match_id'] ?? null;
             $localGroupId = $pairing['group_id'] ?? $groupId;
+            $isBye = $pairing['is_bye'] ?? false;
 
-            // Bỏ qua trận BYE (cả 2 team đều null)
+            // Bỏ qua trận BYE (đội tự động vào vòng sau, không cần tạo trận)
+            if ($isBye) {
+                continue;
+            }
+
+            // Bỏ qua trận không hợp lệ (cả 2 team đều null và không có from_position)
             if ($homeId === null && $awayId === null && $homeFromPosition === null) {
                 continue;
             }
@@ -783,7 +872,7 @@ class TournamentScheduleService
                 $teamAwayConflict = $teamAwayKey && isset($teamSlotUsage[$teamAwayKey]);
 
                 if (!$fieldConflict && !$teamHomeConflict && !$teamAwayConflict) {
-                    // Slot hợp lệ
+                    // Slot hợp lệ - tạo trận đấu
                     $match = TournamentMatch::create([
                         'tournament_id' => $tournament->id,
                         'tournament_round_id' => $round->id,
@@ -833,13 +922,17 @@ class TournamentScheduleService
     }
 
     /**
-     * Lấy danh sách các đội hạng 3 tốt nhất từ các bảng
+     * Lấy danh sách các đội hạng 3 tốt nhất từ TẤT CẢ các bảng
      * Dùng khi cần đủ số đội cho knockout bracket
+     * 
+     * @param array $groups - Danh sách các bảng
+     * @param int $count - Số đội cần lấy
      */
     private function getBestThirdPlacedTeams(array $groups, int $count): array
     {
         $thirdPlaceTeams = [];
 
+        // Lấy đội hạng 3 từ TẤT CẢ các bảng (không skip bảng nào)
         foreach ($groups as $group) {
             // Lấy đội hạng 3 (ranking = 3)
             $thirdPlace = TournamentGroupStanding::where('tournament_group_id', $group->id)

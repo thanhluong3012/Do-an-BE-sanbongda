@@ -719,6 +719,8 @@ class TournamentController extends Controller
                 'num_groups'         => 'nullable|integer|min:2|max:8',
                 'teams_per_group'    => 'nullable|integer|min:2|max:16',
                 'days_between_rounds'=> 'nullable|integer|min:1|max:30',
+                'match_duration'     => 'nullable|integer|min:30|max:180',
+                'preparation_time'   => 'nullable|integer|min:0|max:60',
                 'create_third_place_match' => 'nullable|boolean',
                 'shuffle_teams'      => 'nullable|boolean',
                 'auto_fill_third_place' => 'nullable|boolean',
@@ -763,6 +765,15 @@ class TournamentController extends Controller
             $numGroups        = (int) ($validated['num_groups'] ?? 2);
             $teamsPerGroup    = isset($validated['teams_per_group']) ? (int)$validated['teams_per_group'] : null;
             
+            // Thời gian trận đấu (phút)
+            $matchDuration = (int) ($validated['match_duration'] ?? match($tournament->field_type) {
+                '5v5' => 50,
+                '7v7' => 60,
+                '11v11' => 90,
+                default => 60,
+            });
+            $preparationTime = (int) ($validated['preparation_time'] ?? 15);
+            
             // New options
             $createThirdPlaceMatch = (bool) ($validated['create_third_place_match'] ?? false);
             $shuffleTeams = (bool) ($validated['shuffle_teams'] ?? true);
@@ -782,6 +793,8 @@ class TournamentController extends Controller
                         timeSlots: $timeSlots,
                         fieldIds: $fieldIds,
                         daysBetweenRounds: $daysBetweenRounds,
+                        matchDuration: $matchDuration,
+                        preparationTime: $preparationTime,
                         shuffleTeams: $shuffleTeams,
                         createThirdPlaceMatch: $createThirdPlaceMatch
                     ),
@@ -792,6 +805,8 @@ class TournamentController extends Controller
                         timeSlots: $timeSlots,
                         fieldIds: $fieldIds,
                         daysBetweenRounds: $daysBetweenRounds,
+                        matchDuration: $matchDuration,
+                        preparationTime: $preparationTime,
                         shuffleTeams: $shuffleTeams
                     ),
                     'group_knockout' => $scheduleService->generateGroupKnockout(
@@ -801,6 +816,8 @@ class TournamentController extends Controller
                         timeSlots: $timeSlots,
                         fieldIds: $fieldIds,
                         daysBetweenRounds: $daysBetweenRounds,
+                        matchDuration: $matchDuration,
+                        preparationTime: $preparationTime,
                         numGroups: $numGroups,
                         teamsPerGroup: $teamsPerGroup,
                         shuffleTeams: $shuffleTeams,

@@ -13,6 +13,7 @@ use App\Models\TeamMember;
 use App\Models\Tournament;
 use App\Models\TournamentRegistration;
 use App\Models\TournamentSchedule;
+use App\Models\TournamentSessionPrice;
 use App\Models\User;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\Hash;
@@ -71,6 +72,7 @@ class ComprehensiveSeeder extends Seeder
         echo "   - " . count($owners) . " chủ sân\n";
         echo "   - " . FieldCluster::count() . " cụm sân\n";
         echo "   - " . Field::count() . " sân con\n";
+        echo "   - " . TournamentSessionPrice::count() . " bảng giá theo buổi cho giải đấu\n";
         echo "   - " . count($tournaments) . " giải đấu\n";
         echo "   - " . TournamentRegistration::count() . " đội đăng ký giải đấu\n";
         echo "   - " . Book::where('booking_type', 'tournament')->count() . " booking sân cho giải đấu\n";
@@ -92,7 +94,7 @@ class ComprehensiveSeeder extends Seeder
                 'phone' => "090" . str_pad($i, 7, '0', STR_PAD_LEFT),
                 'code_id' => $this->generateCodeId(),
                 'status' => true, // boolean: true = active
-                'password' => Hash::make('password123'),
+                'password' => Hash::make('123456'),
                 'email_verified_at' => now(),
             ]);
             $users[] = $user;
@@ -118,7 +120,7 @@ class ComprehensiveSeeder extends Seeder
                 'phone' => "091" . str_pad($i, 7, '0', STR_PAD_LEFT),
                 'code_id' => $this->generateCodeId(),
                 'status' => true, // boolean: true = active
-                'password' => Hash::make('password123'),
+                'password' => Hash::make('123456'),
                 'email_verified_at' => now(),
             ]);
 
@@ -169,7 +171,7 @@ class ComprehensiveSeeder extends Seeder
                 'phone' => "092" . str_pad($i, 7, '0', STR_PAD_LEFT),
                 'code_id' => $this->generateCodeId(),
                 'status' => true, // boolean: true = active
-                'password' => Hash::make('password123'),
+                'password' => Hash::make('123456'),
                 'email_verified_at' => now(),
             ]);
 
@@ -210,6 +212,9 @@ class ComprehensiveSeeder extends Seeder
                     // Tạo giá theo giờ cho sân
                     $this->createHourlyPrices($cluster->id, $field->field_type);
                 }
+                
+                // Tạo giá theo buổi cho giải đấu (tournament session prices)
+                $this->createTournamentSessionPrices($cluster->id);
             }
 
             $owners[] = $ownerProfile;
@@ -256,6 +261,56 @@ class ComprehensiveSeeder extends Seeder
     }
 
     /**
+     * Tạo giá theo buổi cho giải đấu (tournament session prices)
+     */
+    private function createTournamentSessionPrices(int $clusterId): void
+    {
+        $fieldTypes = ['5v5', '7v7', '11v11'];
+        $dayTypes = ['weekday', 'weekend'];
+        $sessionTypes = ['morning', 'afternoon', 'evening', 'full_day'];
+
+        foreach ($fieldTypes as $fieldType) {
+            // Giá base theo loại sân (giá cho 1 buổi)
+            $baseSessionPrice = match($fieldType) {
+                '5v5' => 1500000,   // ~5 giờ sáng 6-12h hoặc tối 18-23h
+                '7v7' => 2500000,   // ~5-6 giờ
+                '11v11' => 4000000, // ~5-6 giờ
+                default => 2000000,
+            };
+
+            foreach ($dayTypes as $dayType) {
+                foreach ($sessionTypes as $sessionType) {
+                    // Tính giá theo buổi
+                    $pricePerSession = match($sessionType) {
+                        'morning' => $baseSessionPrice * 0.9,        // Sáng 6-12h (6 giờ) - giảm 10%
+                        'afternoon' => $baseSessionPrice * 0.85,     // Chiều 12-18h (6 giờ) - giảm 15%
+                        'evening' => $baseSessionPrice,              // Tối 18-23h (5 giờ) - giá chuẩn
+                        'full_day' => $baseSessionPrice * 2.5,       // Cả ngày 6-23h (17 giờ) - ưu đãi
+                        default => $baseSessionPrice,
+                    };
+
+                    // Tăng giá 20% cuối tuần
+                    if ($dayType === 'weekend') {
+                        $pricePerSession *= 1.2;
+                    }
+
+                    TournamentSessionPrice::updateOrCreate(
+                        [
+                            'field_cluster_id' => $clusterId,
+                            'field_type' => $fieldType,
+                            'day_type' => $dayType,
+                            'session_type' => $sessionType,
+                        ],
+                        [
+                            'price_per_session' => $pricePerSession,
+                        ]
+                    );
+                }
+            }
+        }
+    }
+
+    /**
      * Tạo giải đấu và đăng ký đội
      */
     private function createTournamentsWithRegistrations(array $owners): array
@@ -275,7 +330,7 @@ class ComprehensiveSeeder extends Seeder
                 'phone' => "093" . str_pad($i, 7, '0', STR_PAD_LEFT),
                 'code_id' => $this->generateCodeId(),
                 'status' => true, // boolean: true = active
-                'password' => Hash::make('password123'),
+                'password' => Hash::make('123456'),
                 'email_verified_at' => now(),
             ]);
 

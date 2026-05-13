@@ -142,6 +142,9 @@ class TournamentMatchController extends Controller
                 // Nếu là trận vòng bảng → tự động cập nhật standings
                 if ($match->tournament_group_id) {
                     $this->updateGroupStandings($match);
+                    
+                    // Kiểm tra xem vòng bảng đã kết thúc chưa → fill teams vào knockout
+                    $this->checkAndFillKnockoutTeams($match->tournament_id);
                 }
 
                 // Nếu là knockout → update trận tiếp theo
@@ -225,6 +228,184 @@ class TournamentMatchController extends Controller
                     'team_advanced' => $teamToAdvance,
                     'home_team_id' => $nextMatch->home_team_id,
                     'away_team_id' => $nextMatch->away_team_id,
+                ]);
+            }
+        }
+    }
+
+    /**
+     * Kiểm tra và tự động fill teams vào knockout sau khi vòng bảng kết thúc
+     */
+    private function checkAndFillKnockoutTeams($tournamentId)
+    {
+        $tournament = \App\Models\Tournament::findOrFail($tournamentId);
+        
+        // Chỉ áp dụng cho group_knockout
+        if ($tournament->format !== 'group_knockout') {
+            return;
+        }
+
+        // Lấy vòng bảng (group_stage)
+        $groupStageRound = \App\Models\TournamentRound::where('tournament_id', $tournamentId)
+            ->where('round_type', 'group_stage')
+            ->first();
+
+        if (!$groupStageRound) {
+            return;
+        }
+
+        // Kiểm tra tất cả trận vòng bảng đã completed chưa
+        $totalGroupMatches = TournamentMatch::where('tournament_round_id', $groupStageRound->id)->count();
+        $completedGroupMatches = TournamentMatch::where('tournament_round_id', $groupStageRound->id)
+            ->where('status', 'completed')
+            ->count();
+
+        if ($totalGroupMatches === 0 || $completedGroupMatches < $totalGroupMatches) {
+            // Vòng bảng chưa kết thúc
+            return;
+        }
+
+        // Lấy vòng knockout đầu tiên
+        $firstKnockoutRound = \App\Models\TournamentRound::where('tournament_id', $tournamentId)
+            ->where('is_knockout', true)
+            ->where('round_type', '!=', 'third_place')
+            ->orderBy('round_order')
+            ->first();
+
+        if (!$firstKnockoutRound) {
+            return;
+        }
+
+        // Kiểm tra xem đã fill chưa (nếu có trận nào có team_id rồi thì bỏ qua)
+        $alreadyFilled = TournamentMatch::where('tournament_round_id', $firstKnockoutRound->id)
+            ->whereNotNull('home_team_id')
+            ->orWhereNotNull('away_team_id')
+            ->exists();
+
+        if ($alreadyFilled) {
+            return; // Đã fill rồi
+        }
+
+        // Lấy tất cả các bảng và standings
+        $groups = \App\Models\TournamentGroup::where('tournament_id', $tournamentId)
+            ->orderBy('group_order')
+            ->get();
+
+        $groupLabels = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
+        $numGroups = $groups->count();
+
+        // Tạo map: label → top teams
+        $topTeams = [];
+        foreach ($groups as $idx => $group) {
+            $label = $groupLabels[$idx];
+            $standings = \App\Models\TournamentGroupStanding::where('tournament_group_id', $group->id)
+                ->orderBy('ranking')
+                ->with('team')
+                ->get();
+
+            $topTeams[$label] = [
+                'first' => $standings->get(0)?->team_id,
+                'second' => $standings->get(1)?->team_id,
+                'third' => $standings->get(2)?->team_id,
+            ];
+        }
+
+        // Lấy đội xếp từ hạng 3 trở đi (hạng 3, 4, 5...) từ TẤT CẢ các bảng
+        $extraTeamsByRank = [];
+        
+        // Tính số đội cần lấy thêm
+        $teamsAdvancing = $numGroups * 2; // Top 2 mỗi bảng
+        $knockoutBracketSize = pow(2, ceil(log($teamsAdvancing, 2))); // 2^n
+        $missingSlots = $knockoutBracketSize - $teamsAdvancing;
+        
+        if ($missingSlots > 0) {
+            $remainingSlots = $missingSlots;
+            $rank = 3;
+            
+            while ($remainingSlots > 0 && $rank <= 10) { // Giới hạn đến hạng 10
+                $teamsAtRank = [];
+                
+                foreach ($groups as $group) {
+                    $standing = \App\Models\TournamentGroupStanding::where('tournament_group_id', $group->id)
+                        ->where('ranking', $rank)
+                        ->with('team')
+                        ->first();
+                    
+                    if ($standing) {
+                        $teamsAtRank[] = $standing;
+                    }
+                }
+                
+                // Sắp xếp đội cùng hạng theo thành tích
+                usort($teamsAtRank, function ($a, $b) {
+                    if ($a->points !== $b->points) return $b->points - $a->points;
+                    if ($a->goal_difference !== $b->goal_difference) return $b->goal_difference - $a->goal_difference;
+                    if ($a->goals_for !== $b->goals_for) return $b->goals_for - $a->goals_for;
+                    if ($a->wins !== $b->wins) return $b->wins - $a->wins;
+                    return 0;
+                });
+                
+                $extraTeamsByRank[$rank] = $teamsAtRank;
+                
+                $take = min($remainingSlots, count($teamsAtRank));
+                $remainingSlots -= $take;
+                $rank++;
+            }
+        }
+
+        // Lấy các trận knockout vòng 1
+        $knockoutMatches = TournamentMatch::where('tournament_round_id', $firstKnockoutRound->id)
+            ->orderBy('match_number')
+            ->get();
+
+        // Fill teams vào các trận
+        foreach ($knockoutMatches as $match) {
+            $homeTeamId = null;
+            $awayTeamId = null;
+
+            // Parse home_from_position để lấy team
+            if (preg_match('/Nhất bảng ([A-H])/u', $match->home_from_position, $matches)) {
+                $label = $matches[1];
+                $homeTeamId = $topTeams[$label]['first'] ?? null;
+            } elseif (preg_match('/Nhì bảng ([A-H])/u', $match->home_from_position, $matches)) {
+                $label = $matches[1];
+                $homeTeamId = $topTeams[$label]['second'] ?? null;
+            } elseif (preg_match('/Hạng (\d+) tốt #(\d+)/u', $match->home_from_position, $matches)) {
+                $rank = (int)$matches[1];
+                $index = (int)$matches[2] - 1; // Convert to 0-based index
+                if (isset($extraTeamsByRank[$rank][$index])) {
+                    $homeTeamId = $extraTeamsByRank[$rank][$index]->team_id;
+                }
+            }
+
+            // Parse away_from_position để lấy team
+            if (preg_match('/Nhất bảng ([A-H])/u', $match->away_from_position, $matches)) {
+                $label = $matches[1];
+                $awayTeamId = $topTeams[$label]['first'] ?? null;
+            } elseif (preg_match('/Nhì bảng ([A-H])/u', $match->away_from_position, $matches)) {
+                $label = $matches[1];
+                $awayTeamId = $topTeams[$label]['second'] ?? null;
+            } elseif (preg_match('/Hạng (\d+) tốt #(\d+)/u', $match->away_from_position, $matches)) {
+                $rank = (int)$matches[1];
+                $index = (int)$matches[2] - 1; // Convert to 0-based index
+                if (isset($extraTeamsByRank[$rank][$index])) {
+                    $awayTeamId = $extraTeamsByRank[$rank][$index]->team_id;
+                }
+            }
+
+            // Update match
+            if ($homeTeamId || $awayTeamId) {
+                $match->update([
+                    'home_team_id' => $homeTeamId,
+                    'away_team_id' => $awayTeamId,
+                ]);
+
+                \Log::info('Auto-filled knockout match', [
+                    'match_id' => $match->id,
+                    'home_team_id' => $homeTeamId,
+                    'away_team_id' => $awayTeamId,
+                    'home_from_position' => $match->home_from_position,
+                    'away_from_position' => $match->away_from_position,
                 ]);
             }
         }
