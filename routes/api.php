@@ -265,6 +265,7 @@ Route::middleware('jwt.auth')->group(function () {
 
     // Routes đặc biệt cho giải đấu
     Route::post('tournaments/{id}/publish', [TournamentController::class, 'publish']);
+    Route::post('tournaments/{id}/complete', [TournamentController::class, 'complete']);
 
     // ==========================================
     // Lịch thi đấu & Bracket

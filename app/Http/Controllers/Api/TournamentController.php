@@ -672,6 +672,57 @@ class TournamentController extends Controller
         }
     }
 
+    // Kết thúc giải thủ công
+    public function complete(string $id)
+    {
+        try {
+            $tournament = Tournament::findOrFail($id);
+
+            $user = Auth::user();
+            if ($tournament->organizer_id !== $user->id) {
+                return ApiResponse::error('Chỉ người tổ chức giải mới có quyền kết thúc giải', null, 403);
+            }
+
+            // Chỉ cho phép kết thúc từ các trạng thái đang hoạt động
+            if (!in_array($tournament->status, ['open', 'in_progress'])) {
+                return ApiResponse::error(
+                    'Chỉ kết thúc được giải ở trạng thái open hoặc in_progress',
+                    ['current_status' => $tournament->status],
+                    400
+                );
+            }
+
+            $totalMatches = \App\Models\TournamentMatch::where('tournament_id', $tournament->id)->count();
+
+            if ($totalMatches === 0) {
+                return ApiResponse::error('Giải chưa có trận đấu để kết thúc', null, 400);
+            }
+
+            $unfinishedCount = \App\Models\TournamentMatch::where('tournament_id', $tournament->id)
+                ->whereIn('status', ['scheduled', 'ongoing', 'postponed'])
+                ->count();
+
+            if ($unfinishedCount > 0) {
+                return ApiResponse::error(
+                    "Không thể kết thúc giải. Còn {$unfinishedCount} trận chưa hoàn tất.",
+                    [
+                        'unfinished_matches' => $unfinishedCount,
+                        'total_matches' => $totalMatches,
+                    ],
+                    400
+                );
+            }
+
+            DB::transaction(function () use ($tournament) {
+                $tournament->update(['status' => 'completed']);
+            });
+
+            return ApiResponse::success('Kết thúc giải đấu thành công', $tournament->fresh());
+        } catch (\Exception $e) {
+            return ApiResponse::error('Lỗi: ' . $e->getMessage(), null, 500);
+        }
+    }
+
     // ================================================================
     // GENERATE SCHEDULE — Tự động sinh lịch thi đấu (1 nút bấm)
     // POST /tournaments/{id}/generate-schedule

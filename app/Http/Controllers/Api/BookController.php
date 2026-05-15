@@ -124,10 +124,10 @@ class BookController extends Controller
             }
 
             // Kiểm tra trùng lịch (bao gồm cả tournament bookings và regular bookings)
-            // 🔥 CHỈ kiểm tra booking đang active (pending_confirmation, confirmed, completed), bỏ qua booking rejected/cancelled
+            // 🔥 CHỈ kiểm tra booking đang active (pending, confirmed, completed), bỏ qua booking đã cancelled
             $conflictBooking = Book::where('field_id', $request->field_id)
                 ->where('day_book', $request->day_book)
-                ->whereIn('status', ['pending_confirmation', 'confirmed', 'completed'])
+                ->whereIn('status', ['pending', 'confirmed', 'completed'])
                 ->where(function ($query) use ($request) {
                     $query->whereBetween('start_time', [$request->start_time, $request->end_time])
                         ->orWhereBetween('end_time', [$request->start_time, $request->end_time])
@@ -237,7 +237,7 @@ class BookController extends Controller
                         'end_time' => $book->end_time,
                         'payment_method' => $request->payment_method,  // Phương thức thanh toán
                         'payment_status' => 'pending',
-                        'booking_status' => 'pending_confirmation',
+                        'booking_status' => 'pending',
                         'total_price' => $calculatedPrice,
                         'action_required' => 'wait_confirmation',
                     ],
@@ -289,7 +289,7 @@ class BookController extends Controller
                 'Đặt sân thành công! Vui lòng chờ chủ sân xác nhận đơn đặt sân của bạn.',
                 [
                     'booking' => $book,
-                    'status' => 'pending_confirmation',
+                    'status' => 'pending',
                     'message' => 'Đơn đặt sân đang chờ chủ sân xác nhận. Bạn sẽ nhận được thông báo khi đơn được xử lý.',
                 ],
                 201
@@ -591,7 +591,7 @@ class BookController extends Controller
                 }
             }
 
-            // Kiểm tra booking đang ở trạng thái pending_confirmation
+            // Kiểm tra booking đang ở trạng thái pending
             if ($book->status !== 'pending') {
                 return ApiResponse::error('Đơn đặt sân này không ở trạng thái chờ xác nhận', null, 400);
             }
@@ -644,17 +644,15 @@ class BookController extends Controller
 
             } else {
                 // ❌ TỪ CHỐI ĐẶT SÂN
-                $book->status = 'rejected';
+                $book->status = 'cancelled';
                 $book->confirmed_by_user_id = $currentUser->id;
-                $book->confirmed_at = now();
-                $book->confirmation_note = $request->note;
                 $book->save();
 
                 $message = 'Đã từ chối đơn đặt sân. Khung giờ đã được giải phóng.';
 
                 Log::info('🔥 [BOOKING REJECT] Booking rejected, slot released', [
                     'booking_id' => $book->id,
-                    'status' => 'rejected',
+                    'status' => 'cancelled',
                 ]);
 
                 // 🔔 Thông báo cho user
@@ -683,7 +681,7 @@ class BookController extends Controller
                 [
                     'booking_id' => $book->id,
                     'status' => $book->status,
-                    'confirmed_at' => $book->confirmed_at,
+                    'processed_at' => $book->updated_at,
                     'confirmed_by' => $currentUser->name,
                     'note' => $request->note ?? null,
                     'booking_info' => [
