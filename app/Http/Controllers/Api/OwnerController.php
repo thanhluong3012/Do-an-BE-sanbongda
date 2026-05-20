@@ -180,6 +180,34 @@ class OwnerController extends Controller
                     'max:1000',
                     'regex:/^https?:\/\//'  // Chỉ chấp nhận full URL
                 ],
+                // 🆕 BANK INFO - Thêm validation cho thông tin tài khoản ngân hàng
+                'bank_id' => [
+                    'sometimes',
+                    'nullable',
+                    'string',
+                    'size:6',  // BIN code có 6 số
+                    'regex:/^[0-9]{6}$/'  // Chỉ chấp nhận số
+                ],
+                'account_no' => [
+                    'sometimes',
+                    'nullable',
+                    'string',
+                    'min:6',
+                    'max:20',
+                    'regex:/^[0-9]+$/'  // Chỉ chấp nhận số
+                ],
+                'account_name' => [
+                    'sometimes',
+                    'nullable',
+                    'string',
+                    'max:255',
+                    'regex:/^[A-Z\s]+$/'  // Chỉ CHỮ HOA và khoảng trắng
+                ],
+            ], [
+                'bank_id.size' => 'Mã ngân hàng phải có đúng 6 số',
+                'bank_id.regex' => 'Mã ngân hàng chỉ được chứa số',
+                'account_no.regex' => 'Số tài khoản chỉ được chứa số',
+                'account_name.regex' => 'Tên chủ tài khoản phải viết HOA không dấu (VD: NGUYEN VAN A)',
             ]);
 
             if ($validator->fails()) {
@@ -216,10 +244,29 @@ class OwnerController extends Controller
                 }
             }
 
+            // 🆕 Cập nhật bank info
+            if ($request->has('bank_id')) {
+                $ownerProfile->bank_id = $request->bank_id;
+            }
+            if ($request->has('account_no')) {
+                $ownerProfile->account_no = $request->account_no;
+            }
+            if ($request->has('account_name')) {
+                // Tự động convert sang chữ hoa và trim
+                $ownerProfile->account_name = $request->account_name ?
+                    strtoupper(trim($request->account_name)) : null;
+            }
+
             $ownerProfile->save();
 
+            // 🎯 Thông báo thêm nếu owner đã cập nhật đủ bank info
+            $message = 'Cập nhật thông tin chủ sân thành công';
+            if ($ownerProfile->hasBankInfo()) {
+                $message .= '. Hệ thống sẽ tự động tạo VietQR cho các booking của bạn.';
+            }
+
             return ApiResponse::success(
-                'Cập nhật thông tin chủ sân thành công',
+                $message,
                 $ownerProfile->load('user'),
                 200
             );

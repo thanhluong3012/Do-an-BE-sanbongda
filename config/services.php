@@ -35,4 +35,14 @@ return [
         ],
     ],
 
+    'vietqr' => [
+        'bank_id' => env('VIETQR_BANK_ID', '970422'),
+        'account_no' => env('VIETQR_ACCOUNT_NO'),
+        'account_name' => env('VIETQR_ACCOUNT_NAME'),
+        'client_id' => env('VIETQR_CLIENT_ID'),
+        'api_key' => env('VIETQR_API_KEY'),
+        'template' => env('VIETQR_TEMPLATE', 'compact'),
+        'api_url' => 'https://api.vietqr.io/v2',
+    ],
+
 ];

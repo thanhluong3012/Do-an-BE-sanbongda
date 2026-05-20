@@ -89,6 +89,16 @@ class FieldClusterController extends Controller
                 return ApiResponse::error('Bạn không có quyền tạo cụm sân', null, 403);
             }
 
+            // Mỗi owner chỉ được quản lý 1 cụm sân.
+            $existingCluster = FieldCluster::where('owner_id', $ownerId)->first();
+            if ($existingCluster) {
+                return ApiResponse::error('Mỗi chủ sân chỉ được quản lý 1 cụm sân', [
+                    'owner_id' => $ownerId,
+                    'existing_cluster_id' => $existingCluster->id,
+                    'existing_cluster_name' => $existingCluster->name,
+                ], 422);
+            }
+
             $cluster = FieldCluster::create([
                 'owner_id' => $ownerId,
                 'name' => $request->name,
@@ -183,6 +193,14 @@ class FieldClusterController extends Controller
             }
 
             if ($currentUser->role->name_role === 'admin' && $request->filled('owner_id')) {
+                $ownerHasAnotherCluster = FieldCluster::where('owner_id', $request->owner_id)
+                    ->where('id', '!=', $cluster->id)
+                    ->exists();
+
+                if ($ownerHasAnotherCluster) {
+                    return ApiResponse::error('Owner này đã có cụm sân, không thể gán thêm', null, 422);
+                }
+
                 $cluster->owner_id = $request->owner_id;
             }
 

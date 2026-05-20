@@ -22,6 +22,7 @@ use App\Http\Controllers\Api\TournamentRoundController;
 use App\Http\Controllers\Api\TournamentGroupController;
 use App\Http\Controllers\Api\TournamentSessionPriceController;
 use App\Http\Controllers\Api\NotificationController;
+use App\Http\Controllers\Api\VietQRController;
 
 
 // ==========================================
@@ -42,6 +43,14 @@ Route::prefix('auth')->group(function () {
 
 // Đăng ký làm chủ sân - Public (không cần đăng nhập)
 Route::post('owner-registrations', [OwnerRegistrationController::class, 'store']);
+
+// ==========================================
+// VietQR Routes - Public (không cần auth để lấy danh sách ngân hàng)
+// ==========================================
+Route::prefix('vietqr')->group(function () {
+    // Lấy danh sách ngân hàng hỗ trợ VietQR (public)
+    Route::get('banks', [VietQRController::class, 'getBanks']);
+});
 
 // Public Routes - Xem thông tin sân cho khách (không cần đăng nhập)
 Route::prefix('public')->group(function () {
@@ -175,6 +184,9 @@ Route::middleware('jwt.auth')->group(function () {
     // ==========================================
     Route::apiResource('books', BookController::class);
 
+    // Staff xem danh sách booking theo phạm vi được giao
+    Route::get('staff/bookings', [BookController::class, 'staffBookings'])->middleware('check.role:staff');
+
     // Lấy thông tin thanh toán (bao gồm QR code)
     Route::get('books/{id}/payment-info', [BookController::class, 'getPaymentInfo']);
 
@@ -207,9 +219,21 @@ Route::middleware('jwt.auth')->group(function () {
         Route::get('bookings/payment-statistics', [BookController::class, 'getPaymentStatistics']);
     });
 
-    // ==========================================
+
+    // VietQR Payment Integration - Thanh toán QR VietQR
+    Route::prefix('vietqr')->group(function () {
+        // Tạo VietQR code cho booking (yêu cầu auth)
+        Route::post('create-payment/{bookingId}', [VietQRController::class, 'createPayment']);
+
+        // Tạo VietQR code cho tournament (yêu cầu auth)
+        Route::post('create-payment/tournament/{tournamentId}', [VietQRController::class, 'createPaymentForTournament']);
+
+        // Kiểm tra trạng thái thanh toán (yêu cầu auth)
+        Route::get('check-status/{bookingId}', [VietQRController::class, 'checkStatus']);
+    });
+
+
     // Team (Đội bóng) - Tất cả user đã đăng nhập
-    // ==========================================
     Route::apiResource('teams', TeamController::class);
 
     // Quản lý thành viên đội
@@ -221,18 +245,16 @@ Route::middleware('jwt.auth')->group(function () {
         Route::delete('members/{id}', [TeamMemberController::class, 'destroy']);
     });
 
-    // ==========================================
+
     // Tournament (Giải đấu) - Cần đăng nhập để tạo/sửa/xóa
-    // ==========================================
     // Xem danh sách và chi tiết không cần auth (đã có ở public routes)
     Route::get('tournaments', [TournamentController::class, 'index']); // User đã login xem theo quyền
     Route::post('tournaments', [TournamentController::class, 'store']);
     Route::get('tournaments/{tournament}', [TournamentController::class, 'show']); // User đã login xem theo quyền
     Route::put('tournaments/{tournament}', [TournamentController::class, 'update']);
 
-    // ==========================================
+
     // Booking sân cho giải đấu
-    // ==========================================
     Route::post('tournaments/{id}/book-fields', [TournamentController::class, 'bookFields']);
     Route::get('tournaments/{id}/field-bookings', [TournamentController::class, 'getFieldBookings']);
     Route::delete('tournaments/{id}/field-bookings/{booking_id}', [TournamentController::class, 'deleteFieldBooking']);
@@ -242,18 +264,17 @@ Route::middleware('jwt.auth')->group(function () {
 
     Route::delete('tournaments/{tournament}', [TournamentController::class, 'destroy']);
 
-    // ==========================================
+
     // Payment Management - Thanh toán giải đấu
-    // ==========================================
     // User upload bill chuyển khoản
     Route::post('tournaments/{id}/upload-payment-proof', [TournamentController::class, 'uploadPaymentProof']);
 
     // Owner xác nhận thanh toán (approve/reject)
     Route::put('tournaments/{id}/confirm-payment', [TournamentController::class, 'confirmPayment']);
 
-    // ==========================================
+
     // Tournament Rules File - File thể lệ giải đấu
-    // ==========================================
+
     // Upload file thể lệ (.pdf, .doc, .docx)
     Route::post('tournaments/{id}/upload-rules-file', [TournamentController::class, 'uploadRulesFile']);
 

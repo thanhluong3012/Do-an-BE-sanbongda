@@ -6,6 +6,7 @@ use App\Helpers\ApiResponse;
 use App\Http\Controllers\Controller;
 use App\Models\Book;
 use App\Models\Field;
+use App\Models\FieldCluster;
 use App\Models\FieldHourlyPrice;
 use App\Models\Notification;
 use App\Models\Tournament;
@@ -16,6 +17,90 @@ use Illuminate\Support\Facades\Log;
 
 class BookController extends Controller
 {
+    /**
+     * Staff lấy danh sách booking theo phạm vi được giao.
+     * API: GET /api/staff/bookings
+     */
+    public function staffBookings(Request $request)
+    {
+        try {
+            $currentUser = auth('api')->user();
+
+            if (!$currentUser) {
+                return ApiResponse::error('Không xác thực được người dùng', null, 401);
+            }
+
+            if ($currentUser->role->name_role !== 'staff') {
+                return ApiResponse::error('Chỉ nhân viên mới được truy cập API này', null, 403);
+            }
+
+            $staff = $currentUser->staff;
+            if (!$staff) {
+                return ApiResponse::error('Tài khoản staff chưa được liên kết hồ sơ nhân viên', null, 403);
+            }
+
+            $validator = Validator::make($request->all(), [
+                'field_cluster_id' => ['nullable', 'integer', 'exists:field_clusters,id'],
+                'status' => ['nullable', 'in:pending,confirmed,cancelled,completed'],
+                'payment_status' => ['nullable', 'in:pending,paid,failed'],
+                'booking_type' => ['nullable', 'in:regular,tournament'],
+                'from_date' => ['nullable', 'date'],
+                'to_date' => ['nullable', 'date'],
+            ]);
+
+            if ($validator->fails()) {
+                return ApiResponse::error('Validation failed', $validator->errors(), 422);
+            }
+
+            if ($request->filled('field_cluster_id')) {
+                $isAllowedCluster = FieldCluster::where('id', $request->field_cluster_id)
+                    ->where('owner_id', $staff->owner_id)
+                    ->exists();
+
+                if (!$isAllowedCluster) {
+                    return ApiResponse::error('Bạn không có quyền xem booking của cụm sân này', null, 403);
+                }
+            }
+
+            $query = Book::with(['user', 'field.fieldCluster', 'tournament'])
+                ->whereHas('field.fieldCluster', function ($q) use ($request, $staff) {
+                    $q->where('owner_id', $staff->owner_id);
+
+                    if ($request->filled('field_cluster_id')) {
+                        $q->where('id', $request->field_cluster_id);
+                    }
+                });
+
+            if ($request->filled('status')) {
+                $query->where('status', $request->status);
+            }
+
+            if ($request->filled('payment_status')) {
+                $query->where('payment_status', $request->payment_status);
+            }
+
+            if ($request->filled('booking_type')) {
+                $query->where('booking_type', $request->booking_type);
+            }
+
+            if ($request->filled('from_date')) {
+                $query->whereDate('day_book', '>=', $request->from_date);
+            }
+
+            if ($request->filled('to_date')) {
+                $query->whereDate('day_book', '<=', $request->to_date);
+            }
+
+            $books = $query->orderBy('day_book', 'desc')
+                ->orderBy('start_time', 'desc')
+                ->get();
+
+            return ApiResponse::success('Danh sách booking theo phạm vi nhân viên', $books, 200);
+        } catch (Exception $e) {
+            return ApiResponse::error('Lấy danh sách booking thất bại', $e->getMessage(), 500);
+        }
+    }
+
     /**
      * Display a listing of the resource.
      * - Admin: xem tất cả booking
@@ -105,7 +190,7 @@ class BookController extends Controller
                 'start_time' => ['required', 'date_format:H:i:s'],
                 'end_time' => ['required', 'date_format:H:i:s', 'after:start_time'],
                 'total_price' => ['nullable', 'numeric', 'min:0'],
-                'payment_method' => ['required', 'string', 'in:cash,transfer'], // User chọn phương thức thanh toán
+                'payment_method' => ['required', 'string', 'in:cash,vietqr'], // User chọn phương thức thanh toán
             ]);
 
             if ($validator->fails()) {
@@ -252,6 +337,7 @@ class BookController extends Controller
                     $paymentMethodLabel = match($request->payment_method) {
                         'cash' => 'Tiền mặt',
                         'transfer' => 'Chuyển khoản',
+                        'vnpay' => 'VNPay QR',
                         default => $request->payment_method
                     };
 
@@ -375,7 +461,12 @@ class BookController extends Controller
                     'total_price' => $book->total_price,
                     'total_price_formatted' => number_format($book->total_price) . ' đ',
                     'payment_method' => $book->payment_method,
-                    'payment_method_label' => $book->payment_method === 'cash' ? 'Tiền mặt' : 'Chuyển khoản',
+                    'payment_method_label' => match($book->payment_method) {
+                        'cash' => 'Tiền mặt',
+                        'transfer' => 'Chuyển khoản',
+                        'vnpay' => 'VNPay QR',
+                        default => $book->payment_method
+                    },
                     'payment_status' => $book->payment_status,
                     'payment_status_label' => match($book->payment_status) {
                         'pending' => 'Chờ thanh toán',
@@ -616,10 +707,18 @@ class BookController extends Controller
                 // 🔔 Thông báo cho user
                 try {
                     $fieldCluster = $book->field->fieldCluster;
-                    $paymentMethodLabel = $book->payment_method === 'cash' ? 'Tiền mặt' : 'Chuyển khoản';
-                    $actionMessage = $book->payment_method === 'cash'
-                        ? 'Vui lòng thanh toán tiền mặt khi đến sân.'
-                        : 'Vui lòng chuyển khoản và upload bill thanh toán.';
+                    $paymentMethodLabel = match($book->payment_method) {
+                        'cash' => 'Tiền mặt',
+                        'transfer' => 'Chuyển khoản',
+                        'vnpay' => 'VNPay QR',
+                        default => $book->payment_method
+                    };
+                    $actionMessage = match($book->payment_method) {
+                        'cash' => 'Vui lòng thanh toán tiền mặt khi đến sân.',
+                        'transfer' => 'Vui lòng chuyển khoản và upload bill thanh toán.',
+                        'vnpay' => 'Vui lòng quét mã QR VNPay để thanh toán.',
+                        default => 'Vui lòng thanh toán theo phương thức đã chọn.'
+                    };
 
                     Notification::create([
                         'user_id' => $book->user_id,
@@ -736,7 +835,7 @@ class BookController extends Controller
             }
 
             $validator = Validator::make($request->all(), [
-                'payment_method' => ['required', 'in:cash,transfer'],
+                'payment_method' => ['required', 'in:cash,vietqr'],
             ]);
 
             if ($validator->fails()) {

@@ -8,6 +8,7 @@ use App\Models\FieldCluster;
 use App\Models\FieldHourlyPrice;
 use App\Models\OwnerProfile;
 use App\Models\Role;
+use App\Models\Staff;
 use App\Models\Team;
 use App\Models\TeamMember;
 use App\Models\Tournament;
@@ -29,15 +30,15 @@ class ComprehensiveSeeder extends Seeder
         ['format' => 'knockout', 'max_teams' => 16, 'field_type' => '11v11'],
         ['format' => 'knockout', 'max_teams' => 32, 'field_type' => '11v11'],
         ['format' => 'knockout', 'max_teams' => 64, 'field_type' => '11v11'],
-        
+
         // Round Robin - không giới hạn số đội
         ['format' => 'round_robin', 'max_teams' => 5, 'field_type' => '5v5'],
         ['format' => 'round_robin', 'max_teams' => 10, 'field_type' => '7v7'],
-        
+
         // Group Knockout với số bảng chẵn
         ['format' => 'group_knockout', 'max_teams' => 16, 'field_type' => '7v7'],
         ['format' => 'group_knockout', 'max_teams' => 32, 'field_type' => '11v11'],
-        
+
         // Group Knockout với số bảng lẻ (odd groups - cần lấy thêm đội xếp hạng 3, 4...)
         ['format' => 'group_knockout', 'max_teams' => 10, 'field_type' => '5v5'], // 5 bảng x 2 đội
         ['format' => 'group_knockout', 'max_teams' => 15, 'field_type' => '7v7'], // 3 bảng x 5 đội hoặc 5 bảng x 3 đội
@@ -80,8 +81,9 @@ class ComprehensiveSeeder extends Seeder
         echo "   - " . Team::count() . " đội bóng\n";
         echo "   - " . TeamMember::count() . " thành viên đội bóng\n";
         echo "   - " . count($owners) . " chủ sân\n";
+        echo "   - " . Staff::count() . " nhân viên sân\n";
         echo "   - " . FieldCluster::count() . " cụm sân\n";
-        echo "   - " . Field::count() . " sân con\n";
+        echo "   - " . Field::count() . " sân con (mỗi cụm có đủ 3 loại: 2x5v5, 2x7v7, 2x11v11)\n";
         echo "   - " . TournamentSessionPrice::count() . " bảng giá theo buổi cho giải đấu\n";
         echo "   - " . count($tournaments) . " giải đấu\n";
         echo "   - " . TournamentRegistration::count() . " đội đăng ký giải đấu\n";
@@ -170,6 +172,7 @@ class ComprehensiveSeeder extends Seeder
     private function createOwnersWithFieldClusters(int $count): array
     {
         $ownerRole = Role::where('name_role', 'owner')->first();
+        $staffRole = Role::where('name_role', 'staff')->first();
         $owners = [];
 
         for ($i = 1; $i <= $count; $i++) {
@@ -195,36 +198,57 @@ class ComprehensiveSeeder extends Seeder
                 'qr_code_image' => null,
             ]);
 
-            // Tạo 1 hoặc 2 cụm sân ngẫu nhiên
-            $clusterCount = rand(1, 2);
-            for ($c = 1; $c <= $clusterCount; $c++) {
-                $cluster = FieldCluster::create([
-                    'owner_id' => $ownerProfile->id,
-                    'name' => "Cụm sân {$i}-{$c}",
-                    'address' => "Địa chỉ cụm {$c}, Quận " . rand(1, 12) . ", TP.HCM",
-                    'phone' => $user->phone,
-                    'description' => "Cụm sân chất lượng cao với đầy đủ tiện nghi",
-                    'image' => null,
-                    'open_time' => '06:00:00',
-                    'close_time' => '23:00:00',
-                ]);
+            // Mỗi chủ sân chỉ có đúng 1 cụm sân
+            $cluster = FieldCluster::create([
+                'owner_id' => $ownerProfile->id,
+                'name' => "Cụm sân {$i}",
+                'address' => "Địa chỉ cụm sân {$i}, Quận " . rand(1, 12) . ", TP.HCM",
+                'phone' => $user->phone,
+                'description' => "Cụm sân chất lượng cao với đầy đủ tiện nghi",
+                'image' => null,
+                'open_time' => '06:00:00',
+                'close_time' => '23:00:00',
+            ]);
 
-                // Tạo 4 sân con với loại ngẫu nhiên
-                for ($f = 1; $f <= 4; $f++) {
-                    $fieldType = $this->fieldTypes[array_rand($this->fieldTypes)];
+            // Tạo sân con đủ loại: mỗi loại tạo 2 sân, tổng 6 sân/cụm
+            $fieldCount = 1;
+            foreach ($this->fieldTypes as $fieldType) {
+                // Mỗi loại tạo 2 sân
+                for ($typeNum = 1; $typeNum <= 2; $typeNum++) {
                     $field = Field::create([
                         'field_cluster_id' => $cluster->id,
-                        'name' => "Sân {$f}",
+                        'name' => "Sân {$fieldCount}",
                         'field_type' => $fieldType,
                         'status' => true, // boolean: true = active
                     ]);
-
-                    // Tạo giá theo giờ cho sân
-                    $this->createHourlyPrices($cluster->id, $field->field_type);
+                    $fieldCount++;
                 }
-                
-                // Tạo giá theo buổi cho giải đấu (tournament session prices)
-                $this->createTournamentSessionPrices($cluster->id);
+                // Cấu hình giá cho loại sân này (ngày thường + cuối tuần)
+                $this->createHourlyPrices($cluster->id, $fieldType);
+            }
+
+            // Tạo giá theo buổi cho giải đấu (tournament session prices)
+            $this->createTournamentSessionPrices($cluster->id);
+
+            // Tạo thêm vài tài khoản staff cho mỗi chủ sân
+            for ($s = 1; $s <= 2; $s++) {
+                $staffUser = User::create([
+                    'role_id' => $staffRole->id,
+                    'name' => "Nhân viên {$i}-{$s}",
+                    'email' => "staff{$i}_{$s}@gmail.com",
+                    'phone' => "093" . str_pad(($i * 10) + $s, 7, '0', STR_PAD_LEFT),
+                    'code_id' => $this->generateCodeId(),
+                    'status' => true,
+                    'password' => Hash::make('123456'),
+                    'email_verified_at' => now(),
+                ]);
+
+                Staff::create([
+                    'user_id' => $staffUser->id,
+                    'owner_id' => $ownerProfile->id,
+                    'code_id' => $this->generateCodeId(),
+                    'avatar' => null,
+                ]);
             }
 
             $owners[] = $ownerProfile;
@@ -373,27 +397,27 @@ class ComprehensiveSeeder extends Seeder
                 'schedule_published' => true,
                 'field_cluster_id' => $selectedCluster->id,
                 'organizer_id' => $organizer->id,
-                'payment_method' => 'transfer',
-                'payment_status' => 'paid',
-                'payment_date' => Carbon::now()->subDays(5),
+                'payment_method' => 'vietqr',
+                'payment_status' => 'pending', // 🔥 Chờ thanh toán (flow thực tế)
+                'payment_date' => null,
                 'payment_proof' => null,
             ]);
 
             // Đăng ký đội vào giải (lấy đủ số đội theo max_teams)
             $teamsToRegister = $allTeams->random(min($format['max_teams'], $allTeams->count()));
-            
+
             foreach ($teamsToRegister as $team) {
                 TournamentRegistration::create([
                     'tournament_id' => $tournament->id,
                     'team_id' => $team->id,
                     'registration_date' => Carbon::now()->subDays(rand(7, 25)),
                     'registration_status' => 'approved',
-                    'payment_status' => 'paid',
-                    'payment_method' => 'transfer',
-                    'payment_date' => Carbon::now()->subDays(rand(5, 20)),
+                    'payment_status' => 'pending', // 🔥 Đội đăng ký cũng chờ thanh toán
+                    'payment_method' => 'vietqr',
+                    'payment_date' => null,
                     'payment_proof' => null,
-                    'payment_confirmed_at' => Carbon::now()->subDays(rand(3, 18)),
-                    'payment_note' => 'Đã thanh toán đầy đủ',
+                    'payment_confirmed_at' => null,
+                    'payment_note' => null,
                     'notes' => null,
                     'admin_notes' => null,
                     'rejected_reason' => null,
@@ -436,7 +460,7 @@ class ComprehensiveSeeder extends Seeder
 
         for ($day = 0; $day < $daysNeeded; $day++) {
             $matchDate = $currentDate->copy()->addDays($day);
-            
+
             // Xác định loại ngày
             $dayType = in_array($matchDate->dayOfWeek, [0, 6]) ? 'weekend' : 'weekday';
 
@@ -454,11 +478,11 @@ class ComprehensiveSeeder extends Seeder
 
             // Tạo booking cho các trận trong ngày
             $matchesThisDay = min($matchesPerDay, $matchCount - ($day * $matchesPerDay));
-            
+
             for ($m = 0; $m < $matchesThisDay; $m++) {
                 $field = $availableFields[$m % $availableFields->count()];
                 $startHour = 18 + ($m * 2); // Bắt đầu từ 18h, mỗi trận cách nhau 2h
-                
+
                 if ($startHour >= 23) break; // Không book quá 23h
 
                 // Kiểm tra xem đã có booking cho field này vào thời gian này chưa
@@ -476,17 +500,17 @@ class ComprehensiveSeeder extends Seeder
                             ->where('day_book', $matchDate)
                             ->where('start_time', sprintf('%02d:00:00', $startHour))
                             ->first();
-                        
+
                         if (!$altBooking) {
                             $alternateField = $altField;
                             break;
                         }
                     }
-                    
+
                     if (!$alternateField) {
                         continue; // Bỏ qua trận này nếu không có sân trống
                     }
-                    
+
                     $field = $alternateField;
                 }
 
@@ -501,7 +525,7 @@ class ComprehensiveSeeder extends Seeder
                     'end_time' => sprintf('%02d:00:00', min($startHour + 2, 23)),
                     'total_price' => $this->getPriceForSession($cluster->id, $tournament->field_type, $dayType, 'evening'),
                     'payment_status' => 'paid',
-                    'payment_method' => 'transfer',
+                    'payment_method' => 'vietqr',
                     'payment_proof' => null,
                     'payment_confirmed_at' => now(),
                     'confirmed_by_user_id' => null,
@@ -555,16 +579,16 @@ class ComprehensiveSeeder extends Seeder
 
     private function generateTeamName(int $index): string
     {
-        $names = ['Rồng', 'Phượng', 'Báo', 'Hổ', 'Sư Tử', 'Đại Bàng', 'Chim Ưng', 'Sóc Vàng', 
-                  'Thiên Long', 'Hải Âu', 'Phù Đổng', 'Lạc Hồng', 'Việt Nam', 'Sài Gòn', 
+        $names = ['Rồng', 'Phượng', 'Báo', 'Hổ', 'Sư Tử', 'Đại Bàng', 'Chim Ưng', 'Sóc Vàng',
+                  'Thiên Long', 'Hải Âu', 'Phù Đổng', 'Lạc Hồng', 'Việt Nam', 'Sài Gòn',
                   'Hà Nội', 'Đà Nẵng', 'Cần Thơ', 'Huế', 'Quảng Nam', 'Bình Dương'];
         return $names[$index % count($names)];
     }
 
     private function generateShortName(int $index): string
     {
-        $shorts = ['DRG', 'PHX', 'LEO', 'TGR', 'LIO', 'EAG', 'HAW', 'FOX', 
-                   'TDR', 'SEG', 'PDG', 'LHG', 'VNM', 'SGN', 
+        $shorts = ['DRG', 'PHX', 'LEO', 'TGR', 'LIO', 'EAG', 'HAW', 'FOX',
+                   'TDR', 'SEG', 'PDG', 'LHG', 'VNM', 'SGN',
                    'HAN', 'DNG', 'CTH', 'HUE', 'QNM', 'BDG'];
         return $shorts[$index % count($shorts)];
     }

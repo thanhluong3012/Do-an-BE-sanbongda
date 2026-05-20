@@ -110,7 +110,7 @@ class TournamentController extends Controller
                 'start_date' => 'required|date|after:registration_end',
                 'end_date' => 'required|date|after:start_date',
                 'field_cluster_id' => 'required|exists:field_clusters,id',
-                'payment_method' => 'required|in:cash,transfer',
+                'payment_method' => 'required|in:cash,vietqr',
                 // ✅ Thêm validation cho bookings (optional)
                 'bookings' => 'nullable|array',
                 'bookings.*.field_id' => 'required_with:bookings|exists:fields,id',
@@ -153,11 +153,11 @@ class TournamentController extends Controller
                 return ApiResponse::error('Cụm sân không có chủ sân', null, 400);
             }
 
-            // Nếu chọn chuyển khoản, kiểm tra owner đã upload QR code chưa
-            if ($validated['payment_method'] === 'transfer') {
-                if (!$fieldCluster->owner->qr_code_image) {
+            // Nếu chọn VietQR, kiểm tra owner đã cấu hình bank info chưa
+            if ($validated['payment_method'] === 'vietqr') {
+                if (!$fieldCluster->owner->hasBankInfo()) {
                     return ApiResponse::error(
-                        'Cụm sân này chưa cấu hình QR code chuyển khoản. Vui lòng chọn phương thức "Tiền mặt" hoặc chọn cụm sân khác.',
+                        'Cụm sân này chưa cấu hình thông tin ngân hàng VietQR. Vui lòng chọn phương thức "Tiền mặt" hoặc chọn cụm sân khác.',
                         null,
                         400
                     );
@@ -299,11 +299,12 @@ class TournamentController extends Controller
                     'total_amount' => $totalPrice,
                 ];
 
-                // Nếu chọn chuyển khoản, thêm QR code URL (trả về trực tiếp từ database - đã là URL từ Supabase)
-                if ($tournament->payment_method === 'transfer' && $fieldCluster->owner->qr_code_image) {
-                    $response['payment_info']['qr_code_url'] = $fieldCluster->owner->qr_code_image;
-                    $response['payment_info']['instruction'] = "Vui lòng quét mã QR để chuyển khoản ĐÚNG số tiền: " . number_format($totalPrice) . " VNĐ và ghi nội dung: BOOK-T{$tournament->id}";
+                // Nếu chọn VietQR, thêm hướng dẫn tạo mã QR
+                if ($tournament->payment_method === 'vietqr') {
+                    $response['payment_info']['instruction'] = "Vui lòng gọi API /api/vietqr/create-payment/tournament/{$tournament->id} để tạo mã VietQR thanh toán. Số tiền: " . number_format($totalPrice) . " VNĐ";
                     $response['payment_info']['transfer_note'] = "BOOK-T{$tournament->id}";
+                    $response['payment_info']['next_step'] = 'create_vietqr';
+                    $response['payment_info']['api_endpoint'] = "/api/vietqr/create-payment/tournament/{$tournament->id}";
                 } elseif ($tournament->payment_method === 'cash') {
                     // ✅ Thêm thông tin liên hệ owner cho tiền mặt
                     $response['payment_info']['instruction'] = "Vui lòng liên hệ chủ sân để thanh toán tiền mặt. Số tiền: " . number_format($totalPrice) . " VNĐ";
@@ -320,7 +321,7 @@ class TournamentController extends Controller
                 // ✅ Tạo thông báo cho owner về giải đấu mới
                 try {
                     $ownerUserId = $fieldCluster->owner->user_id;
-                    $paymentMethodText = $tournament->payment_method === 'cash' ? 'tiền mặt tại sân' : 'chuyển khoản';
+                    $paymentMethodText = $tournament->payment_method === 'cash' ? 'tiền mặt tại sân' : 'VietQR';
 
                     \App\Models\Notification::create([
                         'user_id' => $ownerUserId,
@@ -1503,8 +1504,8 @@ class TournamentController extends Controller
                 return ApiResponse::error('Bạn không có quyền upload bill cho giải này', null, 403);
             }
 
-            // Chỉ giải chọn chuyển khoản mới cần upload bill
-            if ($tournament->payment_method !== 'transfer') {
+            // Chỉ giải chọn VietQR mới cần upload bill
+            if ($tournament->payment_method !== 'vietqr') {
                 return ApiResponse::error('Giải này thanh toán bằng tiền mặt, không cần upload bill', null, 400);
             }
 
@@ -1584,9 +1585,9 @@ class TournamentController extends Controller
                 }
             }
 
-            // Nếu là transfer, kiểm tra đã upload bill chưa
-            if ($tournament->payment_method === 'transfer' && !$tournament->payment_proof && $validated['action'] === 'approve') {
-                return ApiResponse::error('User chưa upload bill chuyển khoản. Không thể xác nhận thanh toán.', null, 400);
+            // Nếu là VietQR, kiểm tra đã upload bill chưa
+            if ($tournament->payment_method === 'vietqr' && !$tournament->payment_proof && $validated['action'] === 'approve') {
+                return ApiResponse::error('User chưa upload bill chuyển khoản VietQR. Không thể xác nhận thanh toán.', null, 400);
             }
 
             // Update payment status
