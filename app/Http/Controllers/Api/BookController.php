@@ -804,7 +804,7 @@ class BookController extends Controller
     /**
      * User thay đổi phương thức thanh toán (nếu chưa thanh toán)
      * API: POST /api/books/{id}/select-payment-method
-     * Body: { "payment_method": "cash|transfer" }
+     * Body: { "payment_method": "cash|vietqr" }
      *
      * ⚠️ LƯU Ý: API này cho phép user THAY ĐỔI payment_method sau khi đã chọn lúc tạo booking
      * Chỉ cho phép thay đổi khi chưa thanh toán (payment_status = 'pending')
@@ -848,7 +848,7 @@ class BookController extends Controller
             // Cập nhật payment_method
             $book->payment_method = $request->payment_method;
 
-            // Nếu đổi từ transfer sang cash hoặc ngược lại, xóa bill cũ
+            // Nếu đổi từ vietqr sang cash hoặc ngược lại, xóa bill cũ
             if ($oldPaymentMethod !== $request->payment_method && $book->payment_proof) {
                 $book->payment_proof = null;
             }
@@ -863,12 +863,12 @@ class BookController extends Controller
                 'total_price' => $book->total_price,
             ];
 
-            if ($request->payment_method === 'transfer') {
+            if ($request->payment_method === 'vietqr') {
                 // Trả về QR code để thanh toán
                 if ($fieldCluster->owner && $fieldCluster->owner->qr_code_image) {
                     $paymentInfo['qr_code_url'] = $fieldCluster->owner->qr_code_image;
                     $paymentInfo['instruction'] = "Vui lòng quét mã QR để chuyển khoản ĐÚNG số tiền: " . number_format($book->total_price) . " VNĐ và ghi nội dung: BOOK-{$book->id}";
-                    $paymentInfo['transfer_note'] = "BOOK-{$book->id}";
+                    $paymentInfo['vietqr_note'] = "BOOK-{$book->id}";
                     $paymentInfo['next_step'] = 'upload_bill';
                     $paymentInfo['message'] = 'Vui lòng chuyển khoản và upload bill để chủ sân xác nhận.';
                 } else {
@@ -936,8 +936,8 @@ class BookController extends Controller
                 return ApiResponse::error('Bạn chưa chọn phương thức thanh toán. Vui lòng chọn phương thức thanh toán trước.', null, 400);
             }
 
-            // Chỉ booking chọn transfer mới cần upload bill
-            if ($book->payment_method !== 'transfer') {
+            // Chỉ booking chọn vietqr mới cần upload bill
+            if ($book->payment_method !== 'vietqr') {
                 return ApiResponse::error('Booking này thanh toán bằng tiền mặt, không cần upload bill', null, 400);
             }
 
@@ -1072,8 +1072,8 @@ class BookController extends Controller
                 return ApiResponse::error('Validation failed', $validator->errors(), 422);
             }
 
-            // Nếu là transfer, kiểm tra đã upload bill chưa
-            if ($book->payment_method === 'transfer' && !$book->payment_proof && $request->action === 'approve') {
+            // Nếu là vietqr, kiểm tra đã upload bill chưa
+            if ($book->payment_method === 'vietqr' && !$book->payment_proof && $request->action === 'approve') {
                 return ApiResponse::error('User chưa upload bill chuyển khoản. Không thể xác nhận thanh toán.', null, 400);
             }
 
@@ -1231,11 +1231,11 @@ class BookController extends Controller
             ];
 
             // Nếu thanh toán qua chuyển khoản và chưa thanh toán → hiển thị QR code
-            if ($book->payment_method === 'transfer' && $book->payment_status === 'pending') {
+            if ($book->payment_method === 'vietqr' && $book->payment_status === 'pending') {
                 if ($fieldCluster->owner && $fieldCluster->owner->qr_code_image) {
                     $paymentInfo['qr_code_url'] = $fieldCluster->owner->qr_code_image;
                     $paymentInfo['instruction'] = "Vui lòng quét mã QR để chuyển khoản ĐÚNG số tiền: " . number_format($book->total_price) . " VNĐ và ghi nội dung: BOOK-{$book->id}";
-                    $paymentInfo['transfer_note'] = "BOOK-{$book->id}";
+                    $paymentInfo['vietqr_note'] = "BOOK-{$book->id}";
                 } else {
                     $paymentInfo['message'] = 'Chủ sân chưa cập nhật QR code. Vui lòng liên hệ chủ sân.';
                 }
@@ -1256,9 +1256,9 @@ class BookController extends Controller
 
     /**
      * Lấy danh sách booking chờ xác nhận thanh toán (cho Owner/Admin)
-     * - transfer: chỉ hiện booking đã upload bill
+     * - vietqr: chỉ hiện booking đã upload bill
      * - cash: hiện tất cả booking cash đang pending
-     * Query params: payment_method (cash|transfer), booking_type (regular|tournament)
+     * Query params: payment_method (cash|vietqr), booking_type (regular|tournament)
      */
     public function getPendingPayments(Request $request)
     {
@@ -1277,9 +1277,9 @@ class BookController extends Controller
             $query = Book::with(['user', 'field.fieldCluster'])
                 ->where('payment_status', 'pending')
                 ->where(function ($q) {
-                    // Lấy transfer booking đã upload bill VÀ cash booking (không cần bill)
+                    // Lấy vietqr booking đã upload bill VÀ cash booking (không cần bill)
                     $q->where(function ($q2) {
-                        $q2->where('payment_method', 'transfer')->whereNotNull('payment_proof');
+                        $q2->where('payment_method', 'vietqr')->whereNotNull('payment_proof');
                     })->orWhere('payment_method', 'cash');
                 });
 
@@ -1309,7 +1309,7 @@ class BookController extends Controller
                 'Danh sách booking chờ xác nhận thanh toán',
                 [
                     'total' => $books->count(),
-                    'transfer_pending' => $books->where('payment_method', 'transfer')->count(),
+                    'vietqr_pending' => $books->where('payment_method', 'vietqr')->count(),
                     'cash_pending' => $books->where('payment_method', 'cash')->count(),
                     'bookings' => $books,
                 ],
@@ -1397,7 +1397,7 @@ class BookController extends Controller
                 'pending_revenue' => (clone $query)->where('payment_status', 'pending')->sum('total_price'),
                 'by_payment_method' => [
                     'cash' => (clone $query)->where('payment_method', 'cash')->count(),
-                    'transfer' => (clone $query)->where('payment_method', 'transfer')->count(),
+                    'vietqr' => (clone $query)->where('payment_method', 'vietqr')->count(),
                 ],
                 'by_field' => $byField,
                 'by_booking_type' => $byBookingType,

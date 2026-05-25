@@ -26,13 +26,13 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>⚽ {{ config('app.name') }}</h1>
+            <h1>⚽ TM ARENA</h1>
             <p style="margin: 8px 0 0; opacity: 0.9;">Xác nhận tài khoản của bạn</p>
         </div>
 
         <div class="body">
             <p>Xin chào <strong>{{ $userName }}</strong>,</p>
-            <p>Cảm ơn bạn đã đăng ký tài khoản tại <strong>{{ config('app.name') }}</strong>. Dưới đây là thông tin tài khoản của bạn:</p>
+            <p>Cảm ơn bạn đã đăng ký tài khoản tại <strong>TM ARENA</strong>. Dưới đây là thông tin tài khoản của bạn:</p>
 
             <div class="info-box">
                 <table>
