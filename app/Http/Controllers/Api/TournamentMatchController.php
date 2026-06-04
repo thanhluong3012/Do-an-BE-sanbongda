@@ -6,11 +6,13 @@ use App\Http\Controllers\Controller;
 use App\Models\TournamentMatch;
 use App\Models\TournamentRegistration;
 use App\Models\TournamentGroupStanding;
+use App\Models\MatchPlayerPenalty;
 use App\Helpers\ApiResponse;
 use App\Services\Tournament\TournamentStandingService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class TournamentMatchController extends Controller
 {
@@ -75,7 +77,8 @@ class TournamentMatchController extends Controller
                 'awayTeam',
                 'field.fieldCluster',
                 'round',
-                'group'
+                'group',
+                'playerPenalties'
             ])->findOrFail($id);
 
             return ApiResponse::success('Chi tiết trận đấu', $match);
@@ -95,7 +98,9 @@ class TournamentMatchController extends Controller
 
     // Cập nhật tỷ số trận đấu
     public function updateScore(Request $request, string $id)
+
     {
+        Log::info('Dữ liệu API nhận được:', $request->all());
         try {
             $match = TournamentMatch::with(['tournament', 'group', 'round'])->findOrFail($id);
 
@@ -110,6 +115,13 @@ class TournamentMatchController extends Controller
                 'away_score' => 'required|integer|min:0',
                 'home_penalty_score' => 'nullable|integer|min:0',
                 'away_penalty_score' => 'nullable|integer|min:0',
+                'status' => 'nullable|in:completed,in_progress',
+                'home_penalties' => 'nullable|array',
+                'home_penalties.*.player_id' => 'required_with:home_penalties|integer|exists:team_members,id',
+                'home_penalties.*.card_type' => 'required_with:home_penalties|in:yellow,red',
+                'away_penalties' => 'nullable|array',
+                'away_penalties.*.player_id' => 'required_with:away_penalties|integer|exists:team_members,id',
+                'away_penalties.*.card_type' => 'required_with:away_penalties|in:yellow,red',
             ]);
 
             DB::beginTransaction();
@@ -139,6 +151,97 @@ class TournamentMatchController extends Controller
                     'status' => 'completed',
                 ]);
 
+                // Lưu penalties vào database + cập nhật counter trong team_members
+                if (array_key_exists('home_penalties', $validated)) {
+                    // Lấy penalties cũ để giảm counters
+                    $oldPenalties = \App\Models\MatchPlayerPenalty::where('match_id', $match->id)
+                        ->where('team_id', $match->home_team_id)
+                        ->get();
+
+                    // Giảm counters từ penalties cũ
+                    foreach ($oldPenalties as $oldPenalty) {
+                        $teamMember = \App\Models\TeamMember::findOrFail($oldPenalty->player_id);
+                        if ($oldPenalty->card_type === 'yellow') {
+                            $teamMember->decrement('yellow_cards');
+                        } elseif ($oldPenalty->card_type === 'red') {
+                            $teamMember->decrement('red_cards');
+                        }
+                    }
+
+                    // Xóa penalties cũ
+                    \App\Models\MatchPlayerPenalty::where('match_id', $match->id)
+                        ->where('team_id', $match->home_team_id)
+                        ->delete();
+
+                    // Lưu penalties mới + tăng counters
+                    foreach ($validated['home_penalties'] as $penalty) {
+                        \App\Models\MatchPlayerPenalty::create([
+                            'match_id' => $match->id,
+                            'team_id' => $match->home_team_id,
+                            'player_id' => $penalty['player_id'],
+                            'card_type' => $penalty['card_type'],
+                        ]);
+
+                        // Cập nhật counter trong team_members
+                        $teamMember = \App\Models\TeamMember::findOrFail($penalty['player_id']);
+                        if ($penalty['card_type'] === 'yellow') {
+                            $teamMember->increment('yellow_cards');
+                        } elseif ($penalty['card_type'] === 'red') {
+                            $teamMember->increment('red_cards');
+                        }
+                    }
+
+                    Log::info('Home team penalties saved', [
+                        'match_id' => $match->id,
+                        'penalties_count' => count($validated['home_penalties']),
+                    ]);
+                }
+
+                if (array_key_exists('away_penalties', $validated)) {
+                    // Lấy penalties cũ để giảm counters
+                    $oldPenalties = \App\Models\MatchPlayerPenalty::where('match_id', $match->id)
+                        ->where('team_id', $match->away_team_id)
+                        ->get();
+
+                    // Giảm counters từ penalties cũ
+                    foreach ($oldPenalties as $oldPenalty) {
+                        $teamMember = \App\Models\TeamMember::findOrFail($oldPenalty->player_id);
+                        if ($oldPenalty->card_type === 'yellow') {
+                            $teamMember->decrement('yellow_cards');
+                        } elseif ($oldPenalty->card_type === 'red') {
+                            $teamMember->decrement('red_cards');
+                        }
+                    }
+
+                    // Xóa penalties cũ
+                    \App\Models\MatchPlayerPenalty::where('match_id', $match->id)
+                        ->where('team_id', $match->away_team_id)
+                        ->delete();
+
+                    // Lưu penalties mới + tăng counters
+                    foreach ($validated['away_penalties'] as $penalty) {
+                        \App\Models\MatchPlayerPenalty::create([
+                            'match_id' => $match->id,
+                            'team_id' => $match->away_team_id,
+                            'player_id' => $penalty['player_id'],
+                            'card_type' => $penalty['card_type'],
+                        ]);
+
+                        // Cập nhật counter trong team_members
+                        $teamMember = \App\Models\TeamMember::findOrFail($penalty['player_id']);
+                        if ($penalty['card_type'] === 'yellow') {
+                            $teamMember->increment('yellow_cards');
+                        } elseif ($penalty['card_type'] === 'red') {
+                            $teamMember->increment('red_cards');
+                        }
+                    }
+
+                    Log::info('Away team penalties saved', [
+                        'match_id' => $match->id,
+                        'penalties_count' => count($validated['away_penalties']),
+                    ]);
+                }
+
                 // Nếu là trận vòng bảng → tự động cập nhật standings
                 if ($match->tournament_group_id) {
                     $this->updateGroupStandings($match);
@@ -154,8 +257,13 @@ class TournamentMatchController extends Controller
 
                 DB::commit();
 
+                // ✅ Return có penalties
                 return ApiResponse::success('Cập nhật tỷ số thành công',
-                    $match->fresh()->load(['homeTeam', 'awayTeam']));
+                    $match->fresh()->load([
+                        'homeTeam',
+                        'awayTeam',
+                        'playerPenalties'
+                    ]));
             } catch (\Exception $e) {
                 DB::rollBack();
                 throw $e;
@@ -195,7 +303,7 @@ class TournamentMatchController extends Controller
                       ->orWhere('away_from_match_id', $currentMatch->id);
             })->get();
 
-        \Log::info('Updating next matches after match completion', [
+        Log::info('Updating next matches after match completion', [
             'current_match_id' => $currentMatch->id,
             'winner_id' => $winnerId,
             'loser_id' => $loserId,
@@ -222,7 +330,7 @@ class TournamentMatchController extends Controller
 
             if ($updated) {
                 $nextMatch->save();
-                \Log::info('Updated next match team', [
+                Log::info('Updated next match team', [
                     'next_match_id' => $nextMatch->id,
                     'is_third_place' => $isThirdPlaceMatch,
                     'team_advanced' => $teamToAdvance,
@@ -342,6 +450,7 @@ class TournamentMatchController extends Controller
                     if ($a->goal_difference !== $b->goal_difference) return $b->goal_difference - $a->goal_difference;
                     if ($a->goals_for !== $b->goals_for) return $b->goals_for - $a->goals_for;
                     if ($a->wins !== $b->wins) return $b->wins - $a->wins;
+                    if ($a->fair_play_points !== $b->fair_play_points) return $b->fair_play_points - $a->fair_play_points;
                     return 0;
                 });
 

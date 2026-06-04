@@ -18,11 +18,22 @@ class TournamentGroupStanding extends Model
         'goals_against',
         'goal_difference',
         'points',
+        'fair_play_points',
         'ranking',
         'is_qualified',
     ];
 
     protected $casts = [
+        'matches_played' => 'integer',
+        'wins' => 'integer',
+        'draws' => 'integer',
+        'losses' => 'integer',
+        'goals_for' => 'integer',
+        'goals_against' => 'integer',
+        'goal_difference' => 'integer',
+        'points' => 'integer',
+        'fair_play_points' => 'integer',
+        'ranking' => 'integer',
         'is_qualified' => 'boolean',
     ];
 

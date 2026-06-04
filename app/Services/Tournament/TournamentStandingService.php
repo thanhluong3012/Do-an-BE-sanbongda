@@ -4,6 +4,7 @@ namespace App\Services\Tournament;
 
 use App\Models\TournamentGroupStanding;
 use App\Models\TournamentMatch;
+use App\Models\MatchPlayerPenalty;
 use Illuminate\Support\Collection;
 
 /**
@@ -30,6 +31,7 @@ class TournamentStandingService
                 'goals_against'    => 0,
                 'goal_difference'  => 0,
                 'points'           => 0,
+                'fair_play_points' => 0,
                 'ranking'          => 0,
             ]);
 
@@ -55,12 +57,13 @@ class TournamentStandingService
             foreach ([$home, $away] as $teamId) {
                 if (!isset($stats[$teamId])) {
                     $stats[$teamId] = [
-                        'matches_played'  => 0,
-                        'wins'            => 0,
-                        'draws'           => 0,
-                        'losses'          => 0,
-                        'goals_for'       => 0,
-                        'goals_against'   => 0,
+                        'matches_played'   => 0,
+                        'wins'             => 0,
+                        'draws'            => 0,
+                        'losses'           => 0,
+                        'goals_for'        => 0,
+                        'goals_against'    => 0,
+                        'fair_play_points' => 0,
                     ];
                 }
                 $stats[$teamId]['matches_played']++;
@@ -86,6 +89,42 @@ class TournamentStandingService
             $stats[$away]['goals_against']  += $homeGoals;
         }
 
+        // Calculate fair_play_points based on player card penalties
+        $matchIds = $matches->pluck('id')->toArray();
+        foreach ($stats as $teamId => $s) {
+            $penalties = MatchPlayerPenalty::whereIn('match_id', $matchIds)
+                ->where('team_id', $teamId)
+                ->get()
+                ->groupBy('match_id')
+                ->map(function ($matchPenalties) {
+                    // Group by player within this match to detect 2 yellows
+                    return $matchPenalties->groupBy('player_id');
+                });
+
+            $fairPlayPoints = 0;
+            foreach ($penalties as $matchId => $playerPenalties) {
+                foreach ($playerPenalties as $playerId => $cards) {
+                    $yellowCount = $cards->where('card_type', 'yellow')->count();
+                    $redCount = $cards->where('card_type', 'red')->count();
+
+                    // 1 red = -3 points
+                    if ($redCount > 0) {
+                        $fairPlayPoints -= 3;
+                    }
+                    // 2 yellows in 1 match = -3 points
+                    elseif ($yellowCount >= 2) {
+                        $fairPlayPoints -= 3;
+                    }
+                    // 1 yellow = -1 point
+                    elseif ($yellowCount === 1) {
+                        $fairPlayPoints -= 1;
+                    }
+                }
+            }
+
+            $stats[$teamId]['fair_play_points'] = $fairPlayPoints;
+        }
+
         // Write accumulated stats back
         foreach ($stats as $teamId => $s) {
             $gd     = $s['goals_for'] - $s['goals_against'];
@@ -94,14 +133,15 @@ class TournamentStandingService
             TournamentGroupStanding::where('tournament_group_id', $groupId)
                 ->where('team_id', $teamId)
                 ->update([
-                    'matches_played'  => $s['matches_played'],
-                    'wins'            => $s['wins'],
-                    'draws'           => $s['draws'],
-                    'losses'          => $s['losses'],
-                    'goals_for'       => $s['goals_for'],
-                    'goals_against'   => $s['goals_against'],
-                    'goal_difference' => $gd,
-                    'points'          => $points,
+                    'matches_played'   => $s['matches_played'],
+                    'wins'             => $s['wins'],
+                    'draws'            => $s['draws'],
+                    'losses'           => $s['losses'],
+                    'goals_for'        => $s['goals_for'],
+                    'goals_against'    => $s['goals_against'],
+                    'goal_difference'  => $gd,
+                    'points'           => $points,
+                    'fair_play_points' => $s['fair_play_points'],
                 ]);
         }
 
@@ -109,13 +149,12 @@ class TournamentStandingService
         $standings = TournamentGroupStanding::where('tournament_group_id', $groupId)
             ->with('team')
             ->get()
-            ->sortByDesc(function ($s) {
-                return [
-                    $s->points,
-                    $s->goal_difference,
-                    $s->goals_for,
-                    $s->wins,
-                ];
+            ->sort(function ($a, $b) {
+                return $b->points <=> $a->points
+                    ?: $b->goal_difference <=> $a->goal_difference
+                    ?: $b->goals_for <=> $a->goals_for
+                    ?: $b->wins <=> $a->wins
+                    ?: $b->fair_play_points <=> $a->fair_play_points;
             })
             ->values();
 

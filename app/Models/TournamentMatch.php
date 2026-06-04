@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class TournamentMatch extends Model
 {
@@ -81,5 +82,10 @@ class TournamentMatch extends Model
     public function awayFromMatch(): BelongsTo
     {
         return $this->belongsTo(TournamentMatch::class, 'away_from_match_id');
+    }
+
+    public function playerPenalties(): HasMany
+    {
+        return $this->hasMany(MatchPlayerPenalty::class, 'match_id');
     }
 }

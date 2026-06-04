@@ -894,6 +894,10 @@ class TournamentScheduleService
                 return $b->wins - $a->wins;
             }
 
+            if ($a->fair_play_points !== $b->fair_play_points) {
+                return $b->fair_play_points - $a->fair_play_points;
+            }
+
             // 5. Random
             return rand(-1, 1);
         });
@@ -929,6 +933,7 @@ class TournamentScheduleService
             ['goal_difference', 'desc'],
             ['goals_for', 'desc'],
             ['wins', 'desc'],
+            ['fair_play_points', 'desc'],
         ]);
 
         // Cập nhật ranking

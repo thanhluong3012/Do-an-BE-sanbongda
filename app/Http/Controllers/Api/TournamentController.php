@@ -969,7 +969,9 @@ class TournamentController extends Controller
             if ($tournament->format === 'round_robin') {
                 $groups = \App\Models\TournamentGroup::with([
                     'standings' => function ($q) {
-                        $q->orderBy('ranking')->with('team');
+                        $q->orderBy('ranking')
+                          ->orderBy('fair_play_points', 'desc')
+                          ->with('team');
                     },
                     'matches' => function ($q) {
                         $q->orderBy('match_number')->with(['homeTeam', 'awayTeam', 'winnerTeam', 'field.fieldCluster']);
@@ -990,7 +992,9 @@ class TournamentController extends Controller
             if ($tournament->format === 'group_knockout') {
                 $groups = \App\Models\TournamentGroup::with([
                     'standings' => function ($q) {
-                        $q->orderBy('ranking')->with('team');
+                        $q->orderBy('ranking')
+                          ->orderBy('fair_play_points', 'desc')
+                          ->with('team');
                     },
                     'matches' => function ($q) {
                         $q->orderBy('match_number')->with(['homeTeam', 'awayTeam', 'winnerTeam', 'field.fieldCluster']);
