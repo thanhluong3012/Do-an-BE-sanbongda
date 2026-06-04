@@ -213,14 +213,8 @@ class BookController extends Controller
             $conflictBooking = Book::where('field_id', $request->field_id)
                 ->where('day_book', $request->day_book)
                 ->whereIn('status', ['pending', 'confirmed', 'completed'])
-                ->where(function ($query) use ($request) {
-                    $query->whereBetween('start_time', [$request->start_time, $request->end_time])
-                        ->orWhereBetween('end_time', [$request->start_time, $request->end_time])
-                        ->orWhere(function ($q) use ($request) {
-                            $q->where('start_time', '<=', $request->start_time)
-                                ->where('end_time', '>=', $request->end_time);
-                        });
-                })
+                ->where('start_time', '<', $request->end_time)
+                ->where('end_time', '>', $request->start_time)
                 ->exists();
 
             if ($conflictBooking) {
@@ -1512,14 +1506,8 @@ class BookController extends Controller
             $conflict = Book::where('field_id', $fieldId)
                 ->where('day_book', $request->date)
                 ->whereNotIn('status', ['cancelled']) // Không tính booking đã hủy
-                ->where(function ($query) use ($request) {
-                    $query->whereBetween('start_time', [$request->start_time, $request->end_time])
-                        ->orWhereBetween('end_time', [$request->start_time, $request->end_time])
-                        ->orWhere(function ($q) use ($request) {
-                            $q->where('start_time', '<=', $request->start_time)
-                                ->where('end_time', '>=', $request->end_time);
-                        });
-                })
+                ->where('start_time', '<', $request->end_time)
+                ->where('end_time', '>', $request->start_time)
                 ->first();
 
             if ($conflict) {
