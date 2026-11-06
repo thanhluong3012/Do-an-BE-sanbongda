@@ -1,0 +1,48 @@
+FROM php:8.2-fpm
+
+# Cài đặt các extension hệ thống cần thiết cho Laravel
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    libpng-dev \
+    libonig-dev \
+    libxml2-dev \
+    zip \
+    unzip \
+    nginx
+
+RUN docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd
+
+# Lấy Composer
+COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
+
+WORKDIR /var/www
+
+COPY . .
+
+# Cài đặt các gói dependency của Laravel
+RUN composer install --no-dev --optimize-autoloader
+
+# Cấp quyền cho các thư mục storage và cache
+RUN chown -R www-data:www-data /var/www/storage /var/www/bootstrap/cache
+RUN chmod -R 775 /var/www/storage /var/www/bootstrap/cache
+
+# Cấu hình Nginx đơn giản để phục vụ file public/index.php
+RUN echo 'server { \
+    listen 80; \
+    index index.php index.html; \
+    root /var/www/public; \
+    location / { \
+        try_files $uri $uri/ /index.php?$query_string; \
+    } \
+    location ~ \.php$ { \
+        fastcgi_pass 127.0.0.1:9000; \
+        fastcgi_index index.php; \
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name; \
+        include fastcgi_params; \
+    } \
+}' > /etc/nginx/sites-available/default
+
+EXPOSE 80
+
+CMD service nginx start && php-fpm
