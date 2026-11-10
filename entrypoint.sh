@@ -1,13 +1,21 @@
+
 #!/bin/sh
+set -e
 
-# Ép cấp quyền ghi toàn bộ cho thư mục storage và bootstrap/cache
-chown -R www-data:www-data /var/www/storage /var/www/bootstrap/cache
-chmod -R 775 /var/www/storage /var/www/bootstrap/cache
+cd /var/www
 
-# Xóa sạch cache cũ của Laravel
+# Tạo các thư mục cần thiết
+mkdir -p storage/logs bootstrap/cache
+
+# Cấp quyền cho Laravel
+chown -R www-data:www-data storage bootstrap/cache
+chmod -R 775 storage bootstrap/cache
+
+# Xóa cache cấu hình cũ
 php artisan config:clear
-php artisan cache:clear
 
-# Khởi động Nginx và chạy PHP-FPM ở foreground
+# Khởi động Nginx
 service nginx start
+
+# Chạy PHP-FPM ở foreground
 exec php-fpm
