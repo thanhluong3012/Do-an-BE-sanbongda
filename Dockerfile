@@ -1,4 +1,3 @@
-
 FROM php:8.2-fpm
 
 # Cài đặt các extension hệ thống cần thiết cho Laravel
@@ -24,12 +23,6 @@ COPY . .
 
 # Cài đặt dependency Laravel
 RUN composer install --no-dev --optimize-autoloader
-
-# Cấp quyền cho Laravel
-RUN mkdir -p storage/logs bootstrap/cache \
-    && touch storage/logs/laravel.log \
-    && chown -R www-data:www-data storage bootstrap/cache \
-    && chmod -R 775 storage bootstrap/cache
 
 # Cấu hình Nginx
 RUN echo 'server { \
