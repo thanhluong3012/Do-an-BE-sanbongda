@@ -45,4 +45,8 @@ RUN echo 'server { \
 
 EXPOSE 80
 
-CMD service nginx start && php-fpm
+# Tạo file entrypoint để xóa cache động mỗi khi container bật lên và chạy Nginx + PHP-FPM
+CMD php artisan config:clear && \
+    php artisan cache:clear && \
+    service nginx start && \
+    php-fpm
