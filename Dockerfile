@@ -23,10 +23,6 @@ COPY . .
 # Cài đặt các gói dependency của Laravel
 RUN composer install --no-dev --optimize-autoloader
 
-# Cấp quyền cho các thư mục storage và cache
-RUN chown -R www-data:www-data /var/www/storage /var/www/bootstrap/cache
-RUN chmod -R 775 /var/www/storage /var/www/bootstrap/cache
-
 # Cấu hình Nginx đơn giản để phục vụ file public/index.php
 RUN echo 'server { \
     listen 80; \
@@ -45,6 +41,7 @@ RUN echo 'server { \
 
 EXPOSE 80
 
+# Copy file entrypoint vào container
 COPY entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
