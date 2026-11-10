@@ -38,10 +38,8 @@ RUN echo 'server { \
         include fastcgi_params; \
     } \
 }' > /etc/nginx/sites-available/default
-
 EXPOSE 80
 
-# Copy file entrypoint vào container
 COPY entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
